@@ -17,14 +17,14 @@
 void tap_tunnel_server() {
     echo::info("TAP Tunnel Server starting...");
 
-    // Create REAL Linux TAP interface (requires sudo)
+    // Create REAL Linux TAP interface (or attach if exists)
     wirebit::TapConfig tap_cfg{
         .interface_name = "tap0", .create_if_missing = true, .destroy_on_close = true, .set_up_on_create = true};
 
     auto tap_link_res = wirebit::TapLink::create(tap_cfg);
     if (tap_link_res.is_err()) {
         echo::error("Failed to create TAP interface: ", tap_link_res.error().message.c_str());
-        echo::error("Did you run with sudo?");
+        echo::error("Try: sudo ip link delete tap0  (to clean up old interface)");
         return;
     }
     auto tap_link = std::make_shared<wirebit::TapLink>(std::move(tap_link_res.value()));
@@ -140,14 +140,14 @@ void tap_tunnel_client() {
     echo::info("TAP Tunnel Client starting...");
     std::this_thread::sleep_for(std::chrono::seconds(1)); // Wait for server
 
-    // Create REAL Linux TAP interface (requires sudo)
+    // Create REAL Linux TAP interface (or attach if exists)
     wirebit::TapConfig tap_cfg{
         .interface_name = "tap1", .create_if_missing = true, .destroy_on_close = true, .set_up_on_create = true};
 
     auto tap_link_res = wirebit::TapLink::create(tap_cfg);
     if (tap_link_res.is_err()) {
         echo::error("Failed to create TAP interface: ", tap_link_res.error().message.c_str());
-        echo::error("Did you run with sudo?");
+        echo::error("Try: sudo ip link delete tap1  (to clean up old interface)");
         return;
     }
     auto tap_link = std::make_shared<wirebit::TapLink>(std::move(tap_link_res.value()));
@@ -256,7 +256,7 @@ int main(int argc, char **argv) {
         echo::info("  TAP TUNNEL - Real Linux TAP Interface over TCP");
         echo::info("═══════════════════════════════════════════════════════");
         echo::info("");
-        echo::info("Usage: sudo ", argv[0], " [server|client]");
+        echo::info("Usage: ", argv[0], " [server|client|cleanup]");
         echo::info("");
         echo::info("This creates REAL Linux TAP interfaces that are visible");
         echo::info("to the operating system and can be used by any program!");
@@ -267,12 +267,12 @@ int main(int argc, char **argv) {
         echo::info("  • Tunnels all L2 Ethernet frames over TCP");
         echo::info("  • You can ping, tcpdump, wireshark, etc!");
         echo::info("");
-        echo::info("Terminal 1: sudo ./tap_tunnel server");
-        echo::info("Terminal 2: sudo ./tap_tunnel client");
+        echo::info("Terminal 1: ./tap_tunnel server");
+        echo::info("Terminal 2: ./tap_tunnel client");
         echo::info("Terminal 3: ping 10.0.0.2");
         echo::info("Terminal 4: sudo tcpdump -i tap0 -XX");
         echo::info("");
-        echo::info("NOTE: Requires sudo for TAP interface creation!");
+        echo::info("Cleanup: ./tap_tunnel cleanup  (removes tap0 and tap1)");
         echo::info("═══════════════════════════════════════════════════════");
         return 1;
     }
@@ -282,8 +282,14 @@ int main(int argc, char **argv) {
         tap_tunnel_server();
     } else if (mode == "client") {
         tap_tunnel_client();
+    } else if (mode == "cleanup") {
+        echo::info("Cleaning up TAP interfaces...");
+        system("sudo ip link delete tap0 2>/dev/null");
+        system("sudo ip link delete tap1 2>/dev/null");
+        echo::info("Cleanup complete!").green();
     } else {
         echo::error("Unknown mode: ", mode.c_str());
+        echo::info("Use: server, client, or cleanup");
         return 1;
     }
 
