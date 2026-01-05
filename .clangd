@@ -1,0 +1,4 @@
+CompileFlags:
+  Add:
+    - "-DHAS_RERUN"
+    - "-I/home/bresilla/.local/include"
