@@ -15,6 +15,7 @@ set(LIB_DEPS
     "datapod|https://github.com/robolibs/datapod.git|0.0.31"
 )
 set(EXAMPLE_DEPS
+    "wirebit|https://github.com/robolibs/wirebit.git|0.0.9"
     "pkg::rerun_sdk"
 )
 set(TEST_DEPS

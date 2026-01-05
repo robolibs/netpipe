@@ -14,7 +14,7 @@ local LIB_DEPS = {
 }
 local EXAMPLE_DEPS = {
     {system = "rerun_sdk"},
-    {"wirebit", "https://github.com/robolibs/wirebit.git", "0.0.8"},
+    {"wirebit", "https://github.com/robolibs/wirebit.git", "0.0.9"},
 }
 local TEST_DEPS = {
     {"doctest", "https://github.com/doctest/doctest.git", "v2.4.11"},
