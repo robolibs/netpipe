@@ -363,7 +363,8 @@ The `examples/` directory contains:
 - **tcp_echo_client.cpp** - TCP echo client
 - **udp_broadcast.cpp** - UDP broadcast sender/receiver
 - **rpc_example.cpp** - RPC client/server
-- **ethernet_tunnel.cpp** - Wirebit Ethernet L2 tunneling over TCP
+- **ethernet_tunnel.cpp** - Wirebit Ethernet L2 tunneling over TCP (simulation with ShmLink)
+- **tap_tunnel.cpp** - **REAL Linux TAP interfaces** - Creates actual network interfaces visible to OS!
 
 Build examples:
 
@@ -385,9 +386,14 @@ Run examples:
 ./build/linux/x86_64/release/rpc_example server
 ./build/linux/x86_64/release/rpc_example client
 
-# Ethernet tunnel (requires wirebit)
+# Ethernet tunnel (simulation - requires wirebit)
 ./build/linux/x86_64/release/ethernet_tunnel server
 ./build/linux/x86_64/release/ethernet_tunnel client
+
+# TAP tunnel (REAL hardware - requires sudo and wirebit)
+sudo ./build/linux/x86_64/release/tap_tunnel server
+sudo ./build/linux/x86_64/release/tap_tunnel client
+# Then try: ping 10.0.0.2, sudo tcpdump -i tap0, ip link show tap0
 ```
 
 ## Building
@@ -432,24 +438,91 @@ make test TEST=test_common
 
 ## Integration with Wirebit
 
-Netpipe integrates seamlessly with the [wirebit](https://github.com/robolibs/wirebit) library for hardware protocol tunneling:
+Netpipe integrates seamlessly with the [wirebit](https://github.com/robolibs/wirebit) library for hardware protocol tunneling.
+
+### Simulation Mode (ShmLink)
+
+Use shared memory for fast, simulated network interfaces:
 
 ```cpp
 #include <netpipe/netpipe.hpp>
 #include <wirebit/wirebit.hpp>
 
-// Tunnel Ethernet frames over TCP
+// Create simulated Ethernet link
+auto shm_link = wirebit::ShmLink::create("eth0", 1024*1024).value();
+wirebit::EthEndpoint eth(std::make_shared<wirebit::ShmLink>(std::move(shm_link)), 
+                         config, 1, mac_addr);
+
+// Tunnel frames over TCP
 netpipe::TcpStream stream;
 stream.connect({"192.168.1.100", 9001});
 
-wirebit::EthEndpoint eth{0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
-auto frame = wirebit::make_eth_frame(eth.mac, dest_mac, 0x0800, payload);
-
+auto frame = eth.recv_eth().value();
 netpipe::Message msg(frame.begin(), frame.end());
 stream.send(msg);
 ```
 
 See `examples/ethernet_tunnel.cpp` for a complete example.
+
+### Real Hardware Mode (TapLink)
+
+Create **actual Linux network interfaces** visible to the entire OS:
+
+```cpp
+#include <netpipe/netpipe.hpp>
+#include <wirebit/wirebit.hpp>
+
+// Create REAL Linux TAP interface (requires sudo!)
+auto tap_link = wirebit::TapLink::create({
+    .interface_name = "tap0",
+    .create_if_missing = true,
+    .destroy_on_close = true,
+    .set_up_on_create = true
+}).value();
+
+wirebit::EthEndpoint eth(std::make_shared<wirebit::TapLink>(std::move(tap_link)),
+                         config, 1, mac_addr);
+
+// Assign IP address
+system("sudo ip addr add 10.0.0.1/24 dev tap0");
+
+// Now you can:
+// - ping through the interface
+// - tcpdump -i tap0
+// - ip link show tap0
+// - Use it like any network interface!
+
+// Tunnel all traffic over TCP
+netpipe::TcpStream stream;
+stream.listen({"0.0.0.0", 9001});
+auto client = stream.accept().value();
+
+while (true) {
+    // TAP -> TCP
+    auto frame = eth.recv_eth();
+    if (frame.is_ok()) {
+        netpipe::Message msg(frame.value().begin(), frame.value().end());
+        client->send(msg);
+    }
+    
+    // TCP -> TAP
+    auto tcp_msg = client->recv();
+    if (tcp_msg.is_ok()) {
+        wirebit::Bytes frame(tcp_msg.value().begin(), tcp_msg.value().end());
+        eth.send_eth(frame);
+    }
+}
+```
+
+See `examples/tap_tunnel.cpp` for a complete example with bidirectional bridging.
+
+**What you can do with TAP tunnel:**
+- Create VPNs and network bridges
+- Test embedded devices remotely
+- Build custom network topologies
+- Monitor traffic with tcpdump/wireshark
+- Use standard networking tools (ping, nc, ssh, etc.)
+- Full OS-level routing and firewall support
 
 ## Design Philosophy
 
