@@ -38,7 +38,7 @@ namespace netpipe {
             fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("socket failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             echo::trace("udp socket created fd=", fd_);
 
@@ -60,8 +60,7 @@ namespace netpipe {
                     ::close(fd_);
                     fd_ = -1;
                     echo::error("invalid address: ", endpoint.host.c_str());
-                    return dp::result::err(
-                        dp::Error::invalid_argument(dp::String("invalid address: ") + endpoint.host));
+                    return dp::result::err(dp::Error::invalid_argument("invalid argument"));
                 }
             }
 
@@ -69,7 +68,7 @@ namespace netpipe {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("bind failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("bind failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             bound_ = true;
@@ -87,7 +86,7 @@ namespace netpipe {
                 fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
                 if (fd_ < 0) {
                     echo::error("socket creation failed: ", strerror(errno));
-                    return dp::result::err(dp::Error::io_error(dp::String("socket failed: ") + strerror(errno)));
+                    return dp::result::err(dp::Error::io_error("io error"));
                 }
                 echo::trace("udp socket created fd=", fd_);
             }
@@ -111,7 +110,7 @@ namespace netpipe {
             dp::i32 ret = ::getaddrinfo(dest.host.c_str(), port_str.c_str(), &hints, &result);
             if (ret != 0) {
                 echo::error("getaddrinfo failed: ", gai_strerror(ret));
-                return dp::result::err(dp::Error::io_error(dp::String("getaddrinfo failed: ") + gai_strerror(ret)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             // Send
@@ -120,7 +119,7 @@ namespace netpipe {
 
             if (n < 0) {
                 echo::error("sendto failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("sendto failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             echo::debug("sent ", n, " bytes to ", dest.to_string());
@@ -134,7 +133,7 @@ namespace netpipe {
                 fd_ = ::socket(AF_INET, SOCK_DGRAM, 0);
                 if (fd_ < 0) {
                     echo::error("socket creation failed: ", strerror(errno));
-                    return dp::result::err(dp::Error::io_error(dp::String("socket failed: ") + strerror(errno)));
+                    return dp::result::err(dp::Error::io_error("io error"));
                 }
                 echo::trace("udp socket created fd=", fd_);
             }
@@ -143,7 +142,7 @@ namespace netpipe {
             dp::i32 broadcast_enable = 1;
             if (::setsockopt(fd_, SOL_SOCKET, SO_BROADCAST, &broadcast_enable, sizeof(broadcast_enable)) < 0) {
                 echo::error("setsockopt SO_BROADCAST failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("setsockopt failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             echo::debug("broadcast enabled");
 
@@ -165,7 +164,7 @@ namespace netpipe {
             dp::isize n = ::sendto(fd_, msg.data(), msg.size(), 0, (struct sockaddr *)&addr, sizeof(addr));
             if (n < 0) {
                 echo::error("broadcast sendto failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("sendto failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             echo::debug("broadcast ", n, " bytes");
@@ -189,7 +188,7 @@ namespace netpipe {
             dp::isize n = ::recvfrom(fd_, msg.data(), msg.size(), 0, (struct sockaddr *)&src_addr, &src_len);
             if (n < 0) {
                 echo::error("recvfrom failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("recvfrom failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             // Resize message to actual received size

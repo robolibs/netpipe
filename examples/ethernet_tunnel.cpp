@@ -1,195 +1,344 @@
+#include <atomic>
 #include <chrono>
 #include <netpipe/netpipe.hpp>
+#include <sys/mman.h>
 #include <thread>
 #include <wirebit/wirebit.hpp>
 
 // Example: Tunnel wirebit Ethernet frames over netpipe TCP
-// This demonstrates bridging L2 Ethernet over a TCP connection
+//
+// Architecture:
+//   [Server ShmLink "eth_server"] <---> [Tunnel Server]
+//                                             |
+//                                        TCP tunnel
+//                                             |
+//   [Client ShmLink "eth_client"] <---> [Tunnel Client]
+//
+// Each side has its OWN ShmLink. The TCP tunnel bridges them.
+// This simulates two separate machines connected via a network tunnel.
 
-void ethernet_tunnel_server() {
-    echo::info("Ethernet Tunnel Server starting...");
+constexpr int TUNNEL_PORT = 9001;
+constexpr int FRAME_COUNT = 5;
 
-    // Create wirebit Ethernet endpoint (simulated network interface)
-    auto eth_link_res = wirebit::ShmLink::create(wirebit::String("eth0"), 1024 * 1024);
-    if (eth_link_res.is_err()) {
-        echo::error("Failed to create ethernet link");
+std::atomic<bool> g_running{true};
+
+void tunnel_server() {
+    echo::info("=== Tunnel Server Starting ===");
+
+    // Create server-side ShmLink
+    auto shm_res = wirebit::ShmLink::create(wirebit::String("eth_server"), 1024 * 1024);
+    if (shm_res.is_err()) {
+        echo::error("Failed to create ShmLink: ", shm_res.error().message.c_str());
         return;
     }
-    auto eth_link = std::make_shared<wirebit::ShmLink>(std::move(eth_link_res.value()));
+    auto shm_link = std::make_shared<wirebit::ShmLink>(std::move(shm_res.value()));
 
-    // Configure Ethernet with MAC address
-    wirebit::MacAddr local_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
-    wirebit::EthConfig eth_cfg{.bandwidth_bps = 1000000000}; // 1 Gbps
-    wirebit::EthEndpoint eth(eth_link, eth_cfg, 1, local_mac);
+    // Create Ethernet endpoint for the tunnel (promiscuous mode to forward all frames)
+    wirebit::MacAddr tunnel_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+    wirebit::EthConfig eth_cfg{.bandwidth_bps = 1000000000, .promiscuous = true};
+    wirebit::EthEndpoint eth(shm_link, eth_cfg, 1, tunnel_mac);
 
-    echo::info("Local Ethernet: MAC=02:00:00:00:00:01");
+    echo::info("Server tunnel endpoint: MAC=02:00:00:00:00:01 (promiscuous)");
 
-    // Create netpipe TCP server for tunneling
+    // Create TCP server
     netpipe::TcpStream tcp_server;
-    netpipe::TcpEndpoint tcp_endpoint{"0.0.0.0", 9001};
+    netpipe::TcpEndpoint tcp_ep{"0.0.0.0", TUNNEL_PORT};
 
-    auto listen_res = tcp_server.listen(tcp_endpoint);
-    if (listen_res.is_err()) {
-        echo::error("TCP listen failed: ", listen_res.error().message.c_str());
+    if (auto res = tcp_server.listen(tcp_ep); res.is_err()) {
+        echo::error("TCP listen failed: ", res.error().message.c_str());
         return;
     }
 
-    echo::info("Waiting for tunnel client on port 9001...");
+    echo::info("Waiting for tunnel client on port ", TUNNEL_PORT, "...");
+
     auto client_res = tcp_server.accept();
     if (client_res.is_err()) {
         echo::error("TCP accept failed: ", client_res.error().message.c_str());
         return;
     }
-
     auto tcp_client = std::move(client_res.value());
-    echo::info("Tunnel established! Bridging Ethernet <-> TCP");
+    echo::info("Tunnel established!");
 
-    // Tunnel loop
-    for (int i = 0; i < 20; i++) {
-        // Ethernet -> TCP tunnel
-        eth.process();
-        auto eth_result = eth.recv_eth();
-        if (eth_result.is_ok()) {
-            wirebit::Bytes eth_frame = eth_result.value();
+    // Thread to receive from TCP and inject into local Ethernet
+    std::thread tcp_to_eth([&]() {
+        while (g_running) {
+            auto recv_res = tcp_client->recv();
+            if (recv_res.is_err()) {
+                if (g_running) {
+                    echo::error("TCP recv failed: ", recv_res.error().message.c_str());
+                }
+                break;
+            }
 
-            // Parse frame to show what we're tunneling
+            auto msg = recv_res.value();
+            wirebit::Bytes frame(msg.begin(), msg.end());
+
+            // Parse and log
             wirebit::MacAddr dst, src;
             uint16_t ethertype;
             wirebit::Bytes payload;
-            wirebit::parse_eth_frame(eth_frame, dst, src, ethertype, payload);
+            wirebit::parse_eth_frame(frame, dst, src, ethertype, payload);
 
-            echo::debug("Ethernet -> TCP: ", eth_frame.size(), " bytes, ethertype=0x", std::hex, ethertype, std::dec);
+            echo::info("[Server] TCP->Eth: ", frame.size(), " bytes from ", wirebit::mac_to_string(src).c_str(),
+                       " ethertype=0x", std::hex, ethertype, std::dec);
 
-            // Send Ethernet frame through TCP tunnel
-            netpipe::Message tcp_msg(eth_frame.begin(), eth_frame.end());
-            auto send_res = tcp_client->send(tcp_msg);
-            if (send_res.is_err()) {
-                echo::error("TCP send failed: ", send_res.error().message.c_str());
-                break;
-            }
+            // Inject into local Ethernet
+            eth.send_eth(frame);
         }
+    });
 
-        // TCP tunnel -> Ethernet
-        auto tcp_result = tcp_client->recv();
-        if (tcp_result.is_ok()) {
-            netpipe::Message tcp_msg = tcp_result.value();
-            wirebit::Bytes eth_frame(tcp_msg.begin(), tcp_msg.end());
+    // Thread to receive from local Ethernet and send over TCP
+    std::thread eth_to_tcp([&]() {
+        while (g_running) {
+            eth.process();
+            auto recv_res = eth.recv_eth();
+            if (recv_res.is_ok()) {
+                auto frame = recv_res.value();
 
-            echo::debug("TCP -> Ethernet: ", eth_frame.size(), " bytes");
+                // Parse and log
+                wirebit::MacAddr dst, src;
+                uint16_t ethertype;
+                wirebit::Bytes payload;
+                wirebit::parse_eth_frame(frame, dst, src, ethertype, payload);
 
-            // Send frame to local Ethernet
-            auto send_res = eth.send_eth(eth_frame);
-            if (send_res.is_err()) {
-                echo::error("Ethernet send failed: ", send_res.error().message.c_str());
-                break;
+                echo::info("[Server] Eth->TCP: ", frame.size(), " bytes to ", wirebit::mac_to_string(dst).c_str(),
+                           " ethertype=0x", std::hex, ethertype, std::dec);
+
+                // Send over TCP tunnel
+                netpipe::Message msg(frame.begin(), frame.end());
+                if (auto res = tcp_client->send(msg); res.is_err()) {
+                    echo::error("TCP send failed: ", res.error().message.c_str());
+                    break;
+                }
             }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+    });
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
+    // Wait for threads
+    tcp_to_eth.join();
+    eth_to_tcp.join();
 
     tcp_client->close();
     tcp_server.close();
-    echo::info("Tunnel closed");
+    echo::info("Server done");
 }
 
-void ethernet_tunnel_client() {
-    echo::info("Ethernet Tunnel Client starting...");
-    std::this_thread::sleep_for(std::chrono::seconds(1)); // Wait for server
+void tunnel_client() {
+    echo::info("=== Tunnel Client Starting ===");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-    // Attach to wirebit Ethernet endpoint
-    auto eth_link_res = wirebit::ShmLink::attach(wirebit::String("eth0"));
-    if (eth_link_res.is_err()) {
-        echo::error("Failed to attach to ethernet link");
+    // Create client-side ShmLink
+    auto shm_res = wirebit::ShmLink::create(wirebit::String("eth_client"), 1024 * 1024);
+    if (shm_res.is_err()) {
+        echo::error("Failed to create ShmLink: ", shm_res.error().message.c_str());
         return;
     }
-    auto eth_link = std::make_shared<wirebit::ShmLink>(std::move(eth_link_res.value()));
+    auto shm_link = std::make_shared<wirebit::ShmLink>(std::move(shm_res.value()));
 
-    // Configure Ethernet with different MAC
-    wirebit::MacAddr local_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x02};
-    wirebit::EthConfig eth_cfg{.bandwidth_bps = 1000000000}; // 1 Gbps
-    wirebit::EthEndpoint eth(eth_link, eth_cfg, 2, local_mac);
+    // Create Ethernet endpoint for the tunnel (promiscuous mode to forward all frames)
+    wirebit::MacAddr tunnel_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x02};
+    wirebit::EthConfig eth_cfg{.bandwidth_bps = 1000000000, .promiscuous = true};
+    wirebit::EthEndpoint eth(shm_link, eth_cfg, 2, tunnel_mac);
 
-    echo::info("Local Ethernet: MAC=02:00:00:00:00:02");
+    echo::info("Client tunnel endpoint: MAC=02:00:00:00:00:02 (promiscuous)");
 
-    // Connect to TCP tunnel
+    // Connect to tunnel server
     netpipe::TcpStream tcp;
-    netpipe::TcpEndpoint tcp_endpoint{"127.0.0.1", 9001};
+    netpipe::TcpEndpoint tcp_ep{"127.0.0.1", TUNNEL_PORT};
 
-    auto connect_res = tcp.connect(tcp_endpoint);
-    if (connect_res.is_err()) {
-        echo::error("TCP connect failed: ", connect_res.error().message.c_str());
+    if (auto res = tcp.connect(tcp_ep); res.is_err()) {
+        echo::error("TCP connect failed: ", res.error().message.c_str());
         return;
     }
-
     echo::info("Connected to tunnel server!");
 
-    // Send test Ethernet frames through the tunnel
-    wirebit::MacAddr remote_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+    // Thread to receive from TCP and inject into local Ethernet
+    std::thread tcp_to_eth([&]() {
+        while (g_running) {
+            auto recv_res = tcp.recv();
+            if (recv_res.is_err()) {
+                if (g_running) {
+                    echo::error("TCP recv failed: ", recv_res.error().message.c_str());
+                }
+                break;
+            }
 
-    for (int i = 0; i < 5; i++) {
-        // Create test payload
-        wirebit::String test_str = wirebit::String("Ethernet packet #") + wirebit::String(std::to_string(i).c_str());
-        wirebit::Bytes payload(test_str.begin(), test_str.end());
+            auto msg = recv_res.value();
+            wirebit::Bytes frame(msg.begin(), msg.end());
 
-        // Create Ethernet frame (IPv4 ethertype 0x0800)
-        wirebit::Bytes eth_frame = wirebit::make_eth_frame(remote_mac, // Destination MAC
-                                                           local_mac,  // Source MAC
-                                                           0x0800,     // Ethertype (IPv4)
-                                                           payload);
-
-        echo::info("Sending Ethernet frame: ", test_str.c_str(), " (", eth_frame.size(), " bytes)");
-
-        // Send through local Ethernet (will be tunneled via TCP)
-        auto send_res = eth.send_eth(eth_frame);
-        if (send_res.is_err()) {
-            echo::error("Ethernet send failed");
-            break;
-        }
-
-        // Receive response through tunnel
-        eth.process();
-        auto recv_res = eth.recv_eth();
-        if (recv_res.is_ok()) {
-            wirebit::Bytes received_frame = recv_res.value();
-
-            // Parse received frame
+            // Parse and log
             wirebit::MacAddr dst, src;
             uint16_t ethertype;
-            wirebit::Bytes recv_payload;
-            wirebit::parse_eth_frame(received_frame, dst, src, ethertype, recv_payload);
+            wirebit::Bytes payload;
+            wirebit::parse_eth_frame(frame, dst, src, ethertype, payload);
 
-            wirebit::String recv_str(reinterpret_cast<const char *>(recv_payload.data()));
-            echo::info("Received frame: ", recv_str.c_str(), " (", received_frame.size(), " bytes)");
+            echo::info("[Client] TCP->Eth: ", frame.size(), " bytes from ", wirebit::mac_to_string(src).c_str(),
+                       " ethertype=0x", std::hex, ethertype, std::dec);
+
+            // Inject into local Ethernet
+            eth.send_eth(frame);
         }
+    });
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
+    // Thread to receive from local Ethernet and send over TCP
+    std::thread eth_to_tcp([&]() {
+        while (g_running) {
+            eth.process();
+            auto recv_res = eth.recv_eth();
+            if (recv_res.is_ok()) {
+                auto frame = recv_res.value();
+
+                // Parse and log
+                wirebit::MacAddr dst, src;
+                uint16_t ethertype;
+                wirebit::Bytes payload;
+                wirebit::parse_eth_frame(frame, dst, src, ethertype, payload);
+
+                echo::info("[Client] Eth->TCP: ", frame.size(), " bytes to ", wirebit::mac_to_string(dst).c_str(),
+                           " ethertype=0x", std::hex, ethertype, std::dec);
+
+                // Send over TCP tunnel
+                netpipe::Message msg(frame.begin(), frame.end());
+                if (auto res = tcp.send(msg); res.is_err()) {
+                    echo::error("TCP send failed: ", res.error().message.c_str());
+                    break;
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+
+    // Wait for threads
+    tcp_to_eth.join();
+    eth_to_tcp.join();
 
     tcp.close();
     echo::info("Client done");
 }
 
+void send_test() {
+    echo::info("=== Test Sender Starting ===");
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // Attach to client's ShmLink
+    auto shm_res = wirebit::ShmLink::attach(wirebit::String("eth_client"));
+    if (shm_res.is_err()) {
+        echo::error("Failed to attach to eth_client: ", shm_res.error().message.c_str());
+        return;
+    }
+    auto shm_link = std::make_shared<wirebit::ShmLink>(std::move(shm_res.value()));
+
+    // Create app endpoint
+    wirebit::MacAddr app_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0xAA};
+    wirebit::EthConfig eth_cfg{.bandwidth_bps = 1000000000};
+    wirebit::EthEndpoint eth(shm_link, eth_cfg, 0xAA, app_mac);
+
+    echo::info("Test sender: MAC=02:00:00:00:00:AA");
+
+    // Destination is on the server side
+    wirebit::MacAddr dst_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0xBB};
+
+    for (int i = 0; i < FRAME_COUNT; i++) {
+        wirebit::String msg = wirebit::String("Hello #") + wirebit::String(std::to_string(i).c_str());
+        wirebit::Bytes payload(msg.begin(), msg.end());
+
+        auto frame = wirebit::make_eth_frame(dst_mac, app_mac, 0x0800, payload);
+        echo::info("[Sender] Sending: \"", msg.c_str(), "\"");
+
+        eth.send_eth(frame);
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+
+    g_running = false;
+    echo::info("Test sender done");
+}
+
+void recv_test() {
+    echo::info("=== Test Receiver Starting ===");
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+    // Attach to server's ShmLink
+    auto shm_res = wirebit::ShmLink::attach(wirebit::String("eth_server"));
+    if (shm_res.is_err()) {
+        echo::error("Failed to attach to eth_server: ", shm_res.error().message.c_str());
+        return;
+    }
+    auto shm_link = std::make_shared<wirebit::ShmLink>(std::move(shm_res.value()));
+
+    // Create app endpoint
+    wirebit::MacAddr app_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0xBB};
+    wirebit::EthConfig eth_cfg{.bandwidth_bps = 1000000000};
+    wirebit::EthEndpoint eth(shm_link, eth_cfg, 0xBB, app_mac);
+
+    echo::info("Test receiver: MAC=02:00:00:00:00:BB");
+
+    int received = 0;
+    while (g_running && received < FRAME_COUNT) {
+        eth.process();
+        auto recv_res = eth.recv_eth();
+        if (recv_res.is_ok()) {
+            auto frame = recv_res.value();
+
+            wirebit::MacAddr dst, src;
+            uint16_t ethertype;
+            wirebit::Bytes payload;
+            wirebit::parse_eth_frame(frame, dst, src, ethertype, payload);
+
+            wirebit::String msg(reinterpret_cast<const char *>(payload.data()), payload.size());
+            echo::info("[Receiver] Got: \"", msg.c_str(), "\" from ", wirebit::mac_to_string(src).c_str());
+            received++;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    echo::info("Test receiver done (", received, " frames)");
+}
+
+void cleanup() {
+    echo::info("Cleaning up shared memory...");
+    shm_unlink("/eth_server_tx");
+    shm_unlink("/eth_server_rx");
+    shm_unlink("/eth_client_tx");
+    shm_unlink("/eth_client_rx");
+    echo::info("Cleanup complete");
+}
+
 int main(int argc, char **argv) {
     if (argc < 2) {
-        echo::info("Usage: ", argv[0], " [server|client]");
+        echo::info("Usage: ", argv[0], " <command>");
         echo::info("");
-        echo::info("Ethernet Tunnel Example - Bridge L2 Ethernet over TCP");
-        echo::info("This demonstrates how wirebit Ethernet endpoints can be");
-        echo::info("tunneled over netpipe TCP connections.");
+        echo::info("Ethernet Tunnel - Bridge L2 Ethernet over TCP");
         echo::info("");
-        echo::info("  server - Start the Ethernet tunnel server");
-        echo::info("  client - Connect and send Ethernet frames");
+        echo::info("Architecture:");
+        echo::info("  [Sender App] -> [eth_client] -> [Tunnel Client]");
+        echo::info("                                        |");
+        echo::info("                                   TCP tunnel");
+        echo::info("                                        |");
+        echo::info("  [Receiver App] <- [eth_server] <- [Tunnel Server]");
+        echo::info("");
+        echo::info("Commands (run in separate terminals):");
+        echo::info("  1. server   - Start tunnel server");
+        echo::info("  2. client   - Start tunnel client");
+        echo::info("  3. recv     - Start test receiver (on server side)");
+        echo::info("  4. send     - Start test sender (on client side)");
+        echo::info("  cleanup     - Remove shared memory segments");
         return 1;
     }
 
     wirebit::String mode(argv[1]);
     if (mode == "server") {
-        ethernet_tunnel_server();
+        tunnel_server();
     } else if (mode == "client") {
-        ethernet_tunnel_client();
+        tunnel_client();
+    } else if (mode == "send") {
+        send_test();
+    } else if (mode == "recv") {
+        recv_test();
+    } else if (mode == "cleanup") {
+        cleanup();
     } else {
-        echo::error("Unknown mode: ", mode.c_str());
+        echo::error("Unknown command: ", mode.c_str());
         return 1;
     }
 

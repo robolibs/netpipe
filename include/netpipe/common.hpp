@@ -49,7 +49,7 @@ namespace netpipe {
                     continue; // Interrupted by signal, retry
                 }
                 echo::error("read failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("read failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             if (n == 0) {
                 echo::debug("connection closed by peer");
@@ -73,7 +73,7 @@ namespace netpipe {
                     continue; // Interrupted by signal, retry
                 }
                 echo::error("write failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("write failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             total_written += static_cast<dp::usize>(n);
             echo::trace("wrote ", n, " bytes, total=", total_written, "/", count);

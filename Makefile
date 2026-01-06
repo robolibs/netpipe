@@ -84,6 +84,20 @@ else
 endif
 
 # ==================================================================================================
+# Internet connectivity check
+# ==================================================================================================
+define check_internet
+	@echo "Checking internet connectivity..."
+	@if ! ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1 && ! ping -c 1 -W 2 1.1.1.1 >/dev/null 2>&1; then \
+		echo "ERROR: No internet connection detected!"; \
+		echo "Cannot proceed with $(1) as it may delete files that require internet to restore."; \
+		echo "Please connect to the internet before running 'make $(1)'."; \
+		exit 1; \
+	fi
+	@echo "Internet connection verified."
+endef
+
+# ==================================================================================================
 # Info
 # ==================================================================================================
 $(info ------------------------------------------)
@@ -117,9 +131,11 @@ config:
 c: config
 
 reconfig:
+	$(call check_internet,reconfig)
 	@$(CMD_RECONFIG)
 
 clean:
+	$(call check_internet,clean)
 	@echo "Cleaning build directory..."
 	@$(CMD_CLEAN)
 	@echo "Build directory cleaned."

@@ -53,7 +53,7 @@ namespace netpipe {
             fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("socket failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             echo::trace("ipc socket created fd=", fd_);
 
@@ -75,7 +75,7 @@ namespace netpipe {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("connect failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("connect failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             connected_ = true;
@@ -100,7 +100,7 @@ namespace netpipe {
             fd_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("socket failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             echo::trace("ipc socket created fd=", fd_);
 
@@ -127,7 +127,7 @@ namespace netpipe {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("bind failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("bind failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             echo::trace("binding to path ", endpoint.path.c_str());
 
@@ -136,7 +136,7 @@ namespace netpipe {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("listen failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("listen failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             listening_ = true;
@@ -163,7 +163,7 @@ namespace netpipe {
             dp::i32 client_fd = ::accept(fd_, (struct sockaddr *)&client_addr, &client_len);
             if (client_fd < 0) {
                 echo::error("accept failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("accept failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             IpcEndpoint client_endpoint{dp::String("client")};
