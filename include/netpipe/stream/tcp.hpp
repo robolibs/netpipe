@@ -43,7 +43,7 @@ namespace netpipe {
             fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("socket failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             echo::trace("socket created fd=", fd_);
 
@@ -59,7 +59,7 @@ namespace netpipe {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("getaddrinfo failed: ", gai_strerror(ret));
-                return dp::result::err(dp::Error::io_error(dp::String("getaddrinfo failed: ") + gai_strerror(ret)));
+                return dp::result::err(dp::Error::io_error("getaddrinfo failed"));
             }
 
             // Try to connect
@@ -70,7 +70,7 @@ namespace netpipe {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("connect failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("connect failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("connect failed"));
             }
 
             connected_ = true;
@@ -89,7 +89,7 @@ namespace netpipe {
             fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("socket failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
             echo::trace("socket created fd=", fd_);
 
@@ -111,8 +111,7 @@ namespace netpipe {
                     ::close(fd_);
                     fd_ = -1;
                     echo::error("invalid address: ", endpoint.host.c_str());
-                    return dp::result::err(
-                        dp::Error::invalid_argument(dp::String("invalid address: ") + endpoint.host));
+                    return dp::result::err(dp::Error::invalid_argument("invalid argument"));
                 }
             }
 
@@ -120,7 +119,7 @@ namespace netpipe {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("bind failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("bind failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             // Start listening
@@ -128,7 +127,7 @@ namespace netpipe {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("listen failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("listen failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             listening_ = true;
@@ -154,7 +153,7 @@ namespace netpipe {
             dp::i32 client_fd = ::accept(fd_, (struct sockaddr *)&client_addr, &client_len);
             if (client_fd < 0) {
                 echo::error("accept failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error(dp::String("accept failed: ") + strerror(errno)));
+                return dp::result::err(dp::Error::io_error("io error"));
             }
 
             // Get client address
