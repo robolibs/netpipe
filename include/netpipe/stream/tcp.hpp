@@ -242,6 +242,26 @@ namespace netpipe {
             return dp::result::ok(std::move(msg));
         }
 
+        // Set receive timeout in milliseconds
+        dp::Res<void> set_recv_timeout(dp::u32 timeout_ms) override {
+            if (fd_ < 0) {
+                echo::error("set_recv_timeout called but socket not created");
+                return dp::result::err(dp::Error::invalid_argument("socket not created"));
+            }
+
+            struct timeval tv;
+            tv.tv_sec = timeout_ms / 1000;
+            tv.tv_usec = (timeout_ms % 1000) * 1000;
+
+            if (::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
+                echo::error("setsockopt SO_RCVTIMEO failed: ", strerror(errno));
+                return dp::result::err(dp::Error::io_error("failed to set timeout"));
+            }
+
+            echo::trace("set recv timeout to ", timeout_ms, "ms");
+            return dp::result::ok();
+        }
+
         // Close the connection
         void close() override {
             if (fd_ >= 0) {

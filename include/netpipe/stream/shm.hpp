@@ -172,6 +172,15 @@ namespace netpipe {
             return dp::result::ok(std::move(msg));
         }
 
+        // Set receive timeout in milliseconds
+        // Note: ShmStream uses lock-free ring buffer, timeout not directly supported
+        // This is a no-op for compatibility with Stream interface
+        dp::Res<void> set_recv_timeout(dp::u32 timeout_ms) override {
+            echo::warn("set_recv_timeout not supported for ShmStream (lock-free ring buffer)");
+            // Return ok to maintain compatibility, but timeout won't be enforced
+            return dp::result::ok();
+        }
+
         // Close and cleanup
         void close() override {
             if (connected_) {

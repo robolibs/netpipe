@@ -30,6 +30,13 @@ namespace netpipe {
                 echo::trace("remote call id=", request_id, " len=", request.size());
                 echo::debug("remote call timeout_ms=", timeout_ms);
 
+                // Set receive timeout
+                auto timeout_res = stream_.set_recv_timeout(timeout_ms);
+                if (timeout_res.is_err()) {
+                    echo::warn("failed to set recv timeout: ", timeout_res.error().message.c_str());
+                    // Continue anyway - some streams may not support timeout
+                }
+
                 // Encode request
                 Message remote_request = encode_remote_message(request_id, request);
 
@@ -40,9 +47,7 @@ namespace netpipe {
                     return dp::result::err(send_res.error());
                 }
 
-                // Receive response
-                // TODO: Implement timeout using select/poll or SO_RCVTIMEO
-                // For now, just blocking recv
+                // Receive response (with timeout set above)
                 auto recv_res = stream_.recv();
                 if (recv_res.is_err()) {
                     echo::error("remote recv failed");

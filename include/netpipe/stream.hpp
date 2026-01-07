@@ -35,6 +35,11 @@ namespace netpipe {
         // Returns the message payload (without framing)
         virtual dp::Res<Message> recv() = 0;
 
+        // Set receive timeout in milliseconds
+        // 0 means no timeout (blocking forever)
+        // Returns error if timeout cannot be set
+        virtual dp::Res<void> set_recv_timeout(dp::u32 timeout_ms) = 0;
+
         // Close the connection and release resources
         virtual void close() = 0;
 
