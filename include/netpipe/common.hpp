@@ -48,6 +48,10 @@ namespace netpipe {
                     echo::trace("read interrupted by signal, retrying");
                     continue; // Interrupted by signal, retry
                 }
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    echo::debug("read timeout");
+                    return dp::result::err(dp::Error::timeout("read timeout"));
+                }
                 echo::error("read failed: ", strerror(errno));
                 return dp::result::err(dp::Error::io_error("io error"));
             }
