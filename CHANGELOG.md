@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.0.5] - 2026-01-07
+
+### <!-- 0 -->⛰️  Features
+
+- Add streaming RPC support (client, server, bidirectional)
+- Add request cancellation support
+- Add metrics and observability to Remote
+- Implement bidirectional Remote for peer-to-peer RPC
+- Add serialization helpers for type-safe Remote calls
+- Support concurrent requests with request tracking
+- Add method/service routing system
+- Improve wire protocol with versioning and extensibility
+- Improve error handling with Res<Message> handler returns
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Implement actual timeout functionality in Remote::call()
+
+### <!-- 2 -->🚜 Refactor
+
+- Rename RPC to Remote and create remote/ folder structure
+
+### <!-- 3 -->📚 Documentation
+
+- Fix README to include ALL netpipe features
+- Update documentation and examples for Remote system
+
+### <!-- 6 -->🧪 Testing
+
+- Add comprehensive Remote test suite
+
 ## [0.0.4] - 2026-01-06
 
 ### <!-- 0 -->⛰️  Features
