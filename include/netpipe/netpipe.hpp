@@ -24,6 +24,7 @@
 // Higher-level protocols
 #include <netpipe/remote/async.hpp>
 #include <netpipe/remote/remote.hpp>
+#include <netpipe/remote/serialization.hpp>
 #include <netpipe/rpc.hpp> // Deprecated: use netpipe/remote/remote.hpp
 
 // All types are in the netpipe:: namespace
