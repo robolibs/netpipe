@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <netpipe/remote/async.hpp>
+#include <netpipe/remote/metrics.hpp>
 #include <netpipe/remote/protocol.hpp>
 #include <netpipe/remote/registry.hpp>
 #include <netpipe/stream.hpp>
@@ -26,6 +27,9 @@ namespace netpipe {
             std::thread receiver_thread_;
             std::atomic<bool> running_;
             dp::usize max_concurrent_requests_;
+            RemoteMetrics client_metrics_; // Metrics for outgoing calls
+            RemoteMetrics server_metrics_; // Metrics for incoming requests
+            bool enable_metrics_;
 
             /// Receiver thread - handles both responses (for our calls) and requests (from peer)
             void receiver_loop() {
@@ -71,6 +75,13 @@ namespace netpipe {
             void handle_request(const DecodedMessageV2 &decoded) {
                 echo::trace("remote peer handling request id=", decoded.request_id, " method=", decoded.method_id);
 
+                // Start metrics tracking if enabled
+                std::unique_ptr<MetricsTracker> tracker;
+                std::unique_ptr<HandlerMetricsTracker> handler_tracker;
+                if (enable_metrics_) {
+                    tracker = std::make_unique<MetricsTracker>(server_metrics_, decoded.payload.size());
+                }
+
                 // Get handler for method_id
                 auto handler_res = registry_.get_handler(decoded.method_id);
                 Message remote_response;
@@ -83,9 +94,17 @@ namespace netpipe {
                     Message error_payload(error_msg.begin(), error_msg.end());
                     remote_response = encode_remote_message_v2(decoded.request_id, decoded.method_id, error_payload,
                                                                MessageType::Error);
+                    if (tracker)
+                        tracker->failure();
                 } else {
                     // Call handler
                     auto handler = handler_res.value();
+
+                    // Track handler execution time
+                    if (enable_metrics_) {
+                        handler_tracker = std::make_unique<HandlerMetricsTracker>(server_metrics_);
+                    }
+
                     auto result = handler(decoded.payload);
 
                     if (result.is_err()) {
@@ -94,10 +113,14 @@ namespace netpipe {
                         Message error_payload(result.error().message.begin(), result.error().message.end());
                         remote_response = encode_remote_message_v2(decoded.request_id, decoded.method_id, error_payload,
                                                                    MessageType::Error);
+                        if (tracker)
+                            tracker->failure();
                     } else {
                         // Handler succeeded
                         remote_response = encode_remote_message_v2(decoded.request_id, decoded.method_id,
                                                                    result.value(), MessageType::Response);
+                        if (tracker)
+                            tracker->success(result.value().size());
                     }
                 }
 
@@ -147,9 +170,10 @@ namespace netpipe {
             }
 
           public:
-            explicit RemotePeer(Stream &stream, dp::usize max_concurrent = 100)
-                : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent) {
-                echo::trace("RemotePeer constructed, max_concurrent=", max_concurrent);
+            explicit RemotePeer(Stream &stream, dp::usize max_concurrent = 100, bool enable_metrics = false)
+                : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent),
+                  enable_metrics_(enable_metrics) {
+                echo::trace("RemotePeer constructed, max_concurrent=", max_concurrent, " metrics=", enable_metrics);
                 // Set receive timeout to allow receiver thread to check running_ flag
                 stream_.set_recv_timeout(100); // 100ms timeout
                 receiver_thread_ = std::thread(&RemotePeer::receiver_loop, this);
@@ -197,11 +221,19 @@ namespace netpipe {
             /// Call a method on the peer (client side)
             /// Thread-safe - can be called from multiple threads
             dp::Res<Message> call(dp::u32 method_id, const Message &request, dp::u32 timeout_ms = 5000) {
+                // Start metrics tracking if enabled
+                std::unique_ptr<MetricsTracker> tracker;
+                if (enable_metrics_) {
+                    tracker = std::make_unique<MetricsTracker>(client_metrics_, request.size());
+                }
+
                 // Check concurrent request limit
                 {
                     std::lock_guard<std::mutex> lock(pending_mutex_);
                     if (pending_requests_.size() >= max_concurrent_requests_) {
                         echo::error("max concurrent requests reached: ", max_concurrent_requests_);
+                        if (tracker)
+                            tracker->failure();
                         return dp::result::err(dp::Error::io_error("max concurrent requests reached"));
                     }
                 }
@@ -229,6 +261,8 @@ namespace netpipe {
                         pending_requests_.erase(request_id);
                     }
                     echo::error("remote peer send failed");
+                    if (tracker)
+                        tracker->failure();
                     return dp::result::err(send_res.error());
                 }
 
@@ -243,11 +277,23 @@ namespace netpipe {
                             pending_requests_.erase(request_id);
                         }
                         echo::error("remote peer call timeout id=", request_id);
+                        if (tracker)
+                            tracker->timeout();
                         return dp::result::err(dp::Error::timeout("call timeout"));
                     }
                 }
 
                 echo::trace("remote peer call completed id=", request_id);
+
+                // Track success/failure
+                if (tracker) {
+                    if (pending->result.is_ok()) {
+                        tracker->success(pending->result.value().size());
+                    } else {
+                        tracker->failure();
+                    }
+                }
+
                 return pending->result;
             }
 
@@ -259,6 +305,21 @@ namespace netpipe {
 
             /// Get number of registered methods
             dp::usize method_count() const { return registry_.method_count(); }
+
+            /// Get client metrics (outgoing calls)
+            const RemoteMetrics &get_client_metrics() const { return client_metrics_; }
+
+            /// Get server metrics (incoming requests)
+            const RemoteMetrics &get_server_metrics() const { return server_metrics_; }
+
+            /// Reset all metrics
+            void reset_metrics() {
+                client_metrics_.reset();
+                server_metrics_.reset();
+            }
+
+            /// Check if metrics are enabled
+            bool metrics_enabled() const { return enable_metrics_; }
         };
 
     } // namespace remote

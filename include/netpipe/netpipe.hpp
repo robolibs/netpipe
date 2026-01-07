@@ -23,6 +23,7 @@
 
 // Higher-level protocols
 #include <netpipe/remote/async.hpp>
+#include <netpipe/remote/metrics.hpp>
 #include <netpipe/remote/peer.hpp>
 #include <netpipe/remote/remote.hpp>
 #include <netpipe/remote/serialization.hpp>

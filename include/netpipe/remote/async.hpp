@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <map>
 #include <mutex>
+#include <netpipe/remote/metrics.hpp>
 #include <netpipe/remote/protocol.hpp>
 #include <netpipe/stream.hpp>
 #include <thread>
@@ -35,6 +36,8 @@ namespace netpipe {
             std::thread receiver_thread_;
             std::atomic<bool> running_;
             dp::usize max_concurrent_requests_;
+            RemoteMetrics metrics_;
+            bool enable_metrics_;
 
             /// Receiver thread function - processes incoming responses
             void receiver_loop() {
@@ -97,9 +100,10 @@ namespace netpipe {
             }
 
           public:
-            explicit RemoteAsync(Stream &stream, dp::usize max_concurrent = 100)
-                : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent) {
-                echo::trace("RemoteAsync constructed, max_concurrent=", max_concurrent);
+            explicit RemoteAsync(Stream &stream, dp::usize max_concurrent = 100, bool enable_metrics = false)
+                : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent),
+                  enable_metrics_(enable_metrics) {
+                echo::trace("RemoteAsync constructed, max_concurrent=", max_concurrent, " metrics=", enable_metrics);
                 receiver_thread_ = std::thread(&RemoteAsync::receiver_loop, this);
             }
 
@@ -131,11 +135,19 @@ namespace netpipe {
             /// Client side: call with concurrent request support
             /// Thread-safe - can be called from multiple threads
             dp::Res<Message> call(dp::u32 method_id, const Message &request, dp::u32 timeout_ms = 5000) {
+                // Start metrics tracking if enabled
+                std::unique_ptr<MetricsTracker> tracker;
+                if (enable_metrics_) {
+                    tracker = std::make_unique<MetricsTracker>(metrics_, request.size());
+                }
+
                 // Check concurrent request limit
                 {
                     std::lock_guard<std::mutex> lock(pending_mutex_);
                     if (pending_requests_.size() >= max_concurrent_requests_) {
                         echo::error("max concurrent requests reached: ", max_concurrent_requests_);
+                        if (tracker)
+                            tracker->failure();
                         return dp::result::err(dp::Error::io_error("max concurrent requests reached"));
                     }
                 }
@@ -163,6 +175,8 @@ namespace netpipe {
                         pending_requests_.erase(request_id);
                     }
                     echo::error("remote async send failed");
+                    if (tracker)
+                        tracker->failure();
                     return dp::result::err(send_res.error());
                 }
 
@@ -177,11 +191,23 @@ namespace netpipe {
                             pending_requests_.erase(request_id);
                         }
                         echo::error("remote async call timeout id=", request_id);
+                        if (tracker)
+                            tracker->timeout();
                         return dp::result::err(dp::Error::timeout("call timeout"));
                     }
                 }
 
                 echo::trace("remote async call completed id=", request_id);
+
+                // Track success/failure
+                if (tracker) {
+                    if (pending->result.is_ok()) {
+                        tracker->success(pending->result.value().size());
+                    } else {
+                        tracker->failure();
+                    }
+                }
+
                 return pending->result;
             }
 
@@ -196,6 +222,15 @@ namespace netpipe {
 
             /// Set maximum concurrent requests
             void set_max_concurrent(dp::usize max) { max_concurrent_requests_ = max; }
+
+            /// Get metrics (if enabled)
+            const RemoteMetrics &get_metrics() const { return metrics_; }
+
+            /// Reset metrics
+            void reset_metrics() { metrics_.reset(); }
+
+            /// Check if metrics are enabled
+            bool metrics_enabled() const { return enable_metrics_; }
         };
 
     } // namespace remote
