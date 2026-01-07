@@ -3,7 +3,7 @@
 #include <thread>
 
 void server() {
-    echo::info("RPC Server starting...");
+    echo::info("Remote RPC Server starting...");
 
     netpipe::TcpStream stream;
     netpipe::TcpEndpoint endpoint{"0.0.0.0", 8080};
@@ -24,8 +24,8 @@ void server() {
     auto client = std::move(client_res.value());
     echo::info("Client connected!");
 
-    // Create RPC server
-    netpipe::Rpc rpc(*client);
+    // Create Remote RPC server
+    netpipe::Remote remote(*client);
 
     // Handler: echo back the request with "Response: " prefix
     auto handler = [](const netpipe::Message &request) -> netpipe::Message {
@@ -37,15 +37,15 @@ void server() {
         return response;
     };
 
-    echo::info("RPC server ready, handling requests...");
-    auto serve_res = rpc.serve(handler);
+    echo::info("Remote RPC server ready, handling requests...");
+    auto serve_res = remote.serve(handler);
     if (serve_res.is_err()) {
         echo::error("Serve failed: ", serve_res.error().message.c_str());
     }
 }
 
 void client() {
-    echo::info("RPC Client starting...");
+    echo::info("Remote RPC Client starting...");
     std::this_thread::sleep_for(std::chrono::seconds(1)); // Wait for server
 
     netpipe::TcpStream stream;
@@ -59,19 +59,19 @@ void client() {
 
     echo::info("Connected to server!");
 
-    // Create RPC client
-    netpipe::Rpc rpc(stream);
+    // Create Remote RPC client
+    netpipe::Remote remote(stream);
 
-    // Make 3 RPC calls
+    // Make 3 Remote RPC calls
     for (int i = 0; i < 3; i++) {
         dp::String req_str = dp::String("Request #") + dp::String(std::to_string(i).c_str());
         netpipe::Message request(req_str.begin(), req_str.end());
 
-        echo::info("Calling RPC: ", req_str.c_str());
-        auto call_res = rpc.call(request, 5000);
+        echo::info("Calling Remote RPC: ", req_str.c_str());
+        auto call_res = remote.call(request, 5000);
 
         if (call_res.is_err()) {
-            echo::error("RPC call failed: ", call_res.error().message.c_str());
+            echo::error("Remote RPC call failed: ", call_res.error().message.c_str());
             break;
         }
 
