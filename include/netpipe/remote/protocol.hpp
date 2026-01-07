@@ -1,15 +1,10 @@
 #pragma once
 
 #include <netpipe/common.hpp>
+#include <netpipe/remote/version.hpp>
 
 namespace netpipe {
     namespace remote {
-
-        /// Protocol version
-        constexpr dp::u8 PROTOCOL_VERSION_1 = 1; // Original: [request_id:4][is_error:1][length:4][payload:N]
-        constexpr dp::u8 PROTOCOL_VERSION_2 =
-            2; // Enhanced: [version:1][type:1][flags:2][request_id:4][method_id:4][length:4][payload:N]
-        constexpr dp::u8 PROTOCOL_VERSION_CURRENT = PROTOCOL_VERSION_2;
 
         /// Message types
         enum class MessageType : dp::u8 {
