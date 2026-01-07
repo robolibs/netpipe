@@ -1,0 +1,442 @@
+#include <chrono>
+#include <doctest/doctest.h>
+#include <netpipe/netpipe.hpp>
+#include <thread>
+
+TEST_CASE("Remote - Basic call/serve functionality") {
+    SUBCASE("Simple echo request/response") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18001};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            netpipe::Remote remote(*client_stream);
+
+            // Echo handler
+            auto handler = [](const netpipe::Message &request) -> netpipe::Message {
+                return request; // Echo back
+            };
+
+            // Serve one request then exit
+            auto recv_res = client_stream->recv();
+            if (recv_res.is_ok()) {
+                auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
+                if (decode_res.is_ok()) {
+                    auto [request_id, request_payload] = decode_res.value();
+                    auto response_payload = handler(request_payload);
+                    auto response = netpipe::remote::encode_remote_message(request_id, response_payload);
+                    client_stream->send(response);
+                }
+            }
+        });
+
+        // Client
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::Remote remote(client);
+
+        netpipe::Message request = {0x01, 0x02, 0x03};
+        auto call_res = remote.call(request, 1000);
+        REQUIRE(call_res.is_ok());
+
+        auto response = call_res.value();
+        CHECK(response.size() == 3);
+        CHECK(response[0] == 0x01);
+        CHECK(response[1] == 0x02);
+        CHECK(response[2] == 0x03);
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+
+    SUBCASE("Multiple sequential calls") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18002};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            netpipe::Remote remote(*client_stream);
+
+            // Handler that increments each byte
+            auto handler = [](const netpipe::Message &request) -> netpipe::Message {
+                netpipe::Message response = request;
+                for (auto &byte : response) {
+                    byte++;
+                }
+                return response;
+            };
+
+            // Serve 3 requests
+            for (int i = 0; i < 3; i++) {
+                auto recv_res = client_stream->recv();
+                if (recv_res.is_ok()) {
+                    auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
+                    if (decode_res.is_ok()) {
+                        auto [request_id, request_payload] = decode_res.value();
+                        auto response_payload = handler(request_payload);
+                        auto response = netpipe::remote::encode_remote_message(request_id, response_payload);
+                        client_stream->send(response);
+                    }
+                }
+            }
+        });
+
+        // Client makes 3 calls
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::Remote remote(client);
+
+        for (int i = 0; i < 3; i++) {
+            netpipe::Message request = {static_cast<dp::u8>(i), static_cast<dp::u8>(i + 1)};
+            auto call_res = remote.call(request, 1000);
+            REQUIRE(call_res.is_ok());
+
+            auto response = call_res.value();
+            CHECK(response.size() == 2);
+            CHECK(response[0] == static_cast<dp::u8>(i + 1));
+            CHECK(response[1] == static_cast<dp::u8>(i + 2));
+        }
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+}
+
+TEST_CASE("Remote - Timeout behavior") {
+    SUBCASE("Call completes before timeout") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18003};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread - responds quickly
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            auto recv_res = client_stream->recv();
+            if (recv_res.is_ok()) {
+                auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
+                if (decode_res.is_ok()) {
+                    auto [request_id, request_payload] = decode_res.value();
+                    auto response = netpipe::remote::encode_remote_message(request_id, request_payload);
+                    client_stream->send(response);
+                }
+            }
+        });
+
+        // Client with generous timeout
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::Remote remote(client);
+
+        netpipe::Message request = {0xAA, 0xBB};
+        auto call_res = remote.call(request, 5000); // 5 second timeout
+        CHECK(call_res.is_ok());
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+
+    SUBCASE("Call times out when server doesn't respond") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18004};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread - accepts but never responds
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            // Read request but don't respond
+            auto recv_res = client_stream->recv();
+
+            // Sleep to ensure client times out
+            std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+        });
+
+        // Client with short timeout
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::Remote remote(client);
+
+        netpipe::Message request = {0x01};
+        auto call_res = remote.call(request, 500); // 500ms timeout
+
+        // Should timeout
+        CHECK(call_res.is_err());
+        // Note: Error type should be timeout, but we check for any error
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+}
+
+TEST_CASE("Remote - Request ID matching") {
+    SUBCASE("Correct request ID in response") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18005};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            auto recv_res = client_stream->recv();
+            if (recv_res.is_ok()) {
+                auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
+                if (decode_res.is_ok()) {
+                    auto [request_id, request_payload] = decode_res.value();
+                    // Echo back with same request_id
+                    auto response = netpipe::remote::encode_remote_message(request_id, request_payload);
+                    client_stream->send(response);
+                }
+            }
+        });
+
+        // Client
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::Remote remote(client);
+
+        netpipe::Message request = {0xFF};
+        auto call_res = remote.call(request, 1000);
+        CHECK(call_res.is_ok());
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+
+    SUBCASE("Mismatched request ID causes error") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18006};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread - sends wrong request_id
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            auto recv_res = client_stream->recv();
+            if (recv_res.is_ok()) {
+                auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
+                if (decode_res.is_ok()) {
+                    auto [request_id, request_payload] = decode_res.value();
+                    // Send response with WRONG request_id
+                    auto response = netpipe::remote::encode_remote_message(request_id + 999, request_payload);
+                    client_stream->send(response);
+                }
+            }
+        });
+
+        // Client
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::Remote remote(client);
+
+        netpipe::Message request = {0x42};
+        auto call_res = remote.call(request, 1000);
+
+        // Should fail due to request_id mismatch
+        CHECK(call_res.is_err());
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+}
+
+TEST_CASE("Remote - Large message handling") {
+    SUBCASE("Send and receive large message") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18007};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            auto recv_res = client_stream->recv();
+            if (recv_res.is_ok()) {
+                auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
+                if (decode_res.is_ok()) {
+                    auto [request_id, request_payload] = decode_res.value();
+                    // Echo back
+                    auto response = netpipe::remote::encode_remote_message(request_id, request_payload);
+                    client_stream->send(response);
+                }
+            }
+        });
+
+        // Client sends large message (1MB)
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::Remote remote(client);
+
+        // Create 1MB message
+        netpipe::Message large_request(1024 * 1024);
+        for (dp::usize i = 0; i < large_request.size(); i++) {
+            large_request[i] = static_cast<dp::u8>(i % 256);
+        }
+
+        auto call_res = remote.call(large_request, 5000);
+        REQUIRE(call_res.is_ok());
+
+        auto response = call_res.value();
+        CHECK(response.size() == large_request.size());
+
+        // Verify content
+        bool content_matches = true;
+        for (dp::usize i = 0; i < response.size(); i++) {
+            if (response[i] != large_request[i]) {
+                content_matches = false;
+                break;
+            }
+        }
+        CHECK(content_matches);
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+}
+
+TEST_CASE("Remote - Error handling") {
+    SUBCASE("Call on disconnected stream fails") {
+        netpipe::TcpStream client;
+        // Not connected
+
+        netpipe::Remote remote(client);
+
+        netpipe::Message request = {0x01};
+        auto call_res = remote.call(request, 1000);
+
+        CHECK(call_res.is_err());
+    }
+
+    SUBCASE("Malformed message causes decode error") {
+        // This test verifies protocol decode error handling
+        netpipe::Message malformed = {0x00, 0x01}; // Too short (< 8 bytes)
+
+        auto decode_res = netpipe::remote::decode_remote_message(malformed);
+        CHECK(decode_res.is_err());
+    }
+
+    SUBCASE("Message size mismatch causes decode error") {
+        // Create message with incorrect length field
+        netpipe::Message msg;
+
+        // request_id = 0
+        msg.push_back(0x00);
+        msg.push_back(0x00);
+        msg.push_back(0x00);
+        msg.push_back(0x00);
+
+        // length = 10 (but we only provide 2 bytes)
+        msg.push_back(0x00);
+        msg.push_back(0x00);
+        msg.push_back(0x00);
+        msg.push_back(0x0A);
+
+        // payload (only 2 bytes instead of 10)
+        msg.push_back(0xAA);
+        msg.push_back(0xBB);
+
+        auto decode_res = netpipe::remote::decode_remote_message(msg);
+        CHECK(decode_res.is_err());
+    }
+}
+
+TEST_CASE("Remote - Protocol encoding/decoding") {
+    SUBCASE("Encode and decode round trip") {
+        dp::u32 request_id = 12345;
+        netpipe::Message payload = {0x01, 0x02, 0x03, 0x04, 0x05};
+
+        auto encoded = netpipe::remote::encode_remote_message(request_id, payload);
+
+        // Verify encoded format: [request_id:4][length:4][payload:N]
+        CHECK(encoded.size() == 8 + payload.size());
+
+        auto decode_res = netpipe::remote::decode_remote_message(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        auto [decoded_id, decoded_payload] = decode_res.value();
+        CHECK(decoded_id == request_id);
+        CHECK(decoded_payload.size() == payload.size());
+
+        for (dp::usize i = 0; i < payload.size(); i++) {
+            CHECK(decoded_payload[i] == payload[i]);
+        }
+    }
+
+    SUBCASE("Empty payload") {
+        dp::u32 request_id = 0;
+        netpipe::Message empty_payload;
+
+        auto encoded = netpipe::remote::encode_remote_message(request_id, empty_payload);
+        CHECK(encoded.size() == 8); // Just header, no payload
+
+        auto decode_res = netpipe::remote::decode_remote_message(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        auto [decoded_id, decoded_payload] = decode_res.value();
+        CHECK(decoded_id == 0);
+        CHECK(decoded_payload.size() == 0);
+    }
+}
