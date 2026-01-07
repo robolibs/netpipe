@@ -546,3 +546,146 @@ TEST_CASE("Remote - Handler error responses") {
         server.close();
     }
 }
+
+TEST_CASE("Remote - Protocol V2") {
+    SUBCASE("V2 encode and decode round trip") {
+        dp::u32 request_id = 12345;
+        dp::u32 method_id = 42;
+        netpipe::Message payload = {0x01, 0x02, 0x03, 0x04, 0x05};
+
+        auto encoded = netpipe::remote::encode_remote_message_v2(request_id, method_id, payload,
+                                                                  netpipe::remote::MessageType::Request,
+                                                                  netpipe::remote::MessageFlags::None);
+
+        // Verify encoded format: [version:1][type:1][flags:2][request_id:4][method_id:4][length:4][payload:N]
+        CHECK(encoded.size() == 16 + payload.size());
+        CHECK(encoded[0] == netpipe::remote::PROTOCOL_VERSION_2);
+        CHECK(encoded[1] == static_cast<dp::u8>(netpipe::remote::MessageType::Request));
+
+        auto decode_res = netpipe::remote::decode_remote_message_v2(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        auto decoded = decode_res.value();
+        CHECK(decoded.version == netpipe::remote::PROTOCOL_VERSION_2);
+        CHECK(decoded.type == netpipe::remote::MessageType::Request);
+        CHECK(decoded.flags == netpipe::remote::MessageFlags::None);
+        CHECK(decoded.request_id == request_id);
+        CHECK(decoded.method_id == method_id);
+        CHECK(decoded.payload.size() == payload.size());
+
+        for (dp::usize i = 0; i < payload.size(); i++) {
+            CHECK(decoded.payload[i] == payload[i]);
+        }
+    }
+
+    SUBCASE("V2 different message types") {
+        dp::u32 request_id = 100;
+        dp::u32 method_id = 5;
+        netpipe::Message payload = {0xAA, 0xBB};
+
+        // Test Response type
+        auto response_msg = netpipe::remote::encode_remote_message_v2(
+            request_id, method_id, payload, netpipe::remote::MessageType::Response);
+        auto response_res = netpipe::remote::decode_remote_message_v2(response_msg);
+        REQUIRE(response_res.is_ok());
+        CHECK(response_res.value().type == netpipe::remote::MessageType::Response);
+
+        // Test Error type
+        auto error_msg = netpipe::remote::encode_remote_message_v2(request_id, method_id, payload,
+                                                                    netpipe::remote::MessageType::Error);
+        auto error_res = netpipe::remote::decode_remote_message_v2(error_msg);
+        REQUIRE(error_res.is_ok());
+        CHECK(error_res.value().type == netpipe::remote::MessageType::Error);
+
+        // Test Notification type
+        auto notif_msg = netpipe::remote::encode_remote_message_v2(request_id, method_id, payload,
+                                                                    netpipe::remote::MessageType::Notification);
+        auto notif_res = netpipe::remote::decode_remote_message_v2(notif_msg);
+        REQUIRE(notif_res.is_ok());
+        CHECK(notif_res.value().type == netpipe::remote::MessageType::Notification);
+    }
+
+    SUBCASE("V2 message flags") {
+        dp::u32 request_id = 200;
+        dp::u32 method_id = 10;
+        netpipe::Message payload = {0x01};
+
+        // Test with flags
+        dp::u16 flags = netpipe::remote::MessageFlags::Compressed | netpipe::remote::MessageFlags::RequiresAck;
+        auto encoded = netpipe::remote::encode_remote_message_v2(request_id, method_id, payload,
+                                                                  netpipe::remote::MessageType::Request, flags);
+
+        auto decode_res = netpipe::remote::decode_remote_message_v2(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        auto decoded = decode_res.value();
+        CHECK(decoded.flags == flags);
+        CHECK((decoded.flags & netpipe::remote::MessageFlags::Compressed) != 0);
+        CHECK((decoded.flags & netpipe::remote::MessageFlags::RequiresAck) != 0);
+        CHECK((decoded.flags & netpipe::remote::MessageFlags::Streaming) == 0);
+    }
+
+    SUBCASE("Auto-detect V2 protocol") {
+        dp::u32 request_id = 300;
+        dp::u32 method_id = 15;
+        netpipe::Message payload = {0xFF, 0xEE};
+
+        auto encoded = netpipe::remote::encode_remote_message_v2(request_id, method_id, payload);
+
+        auto decode_res = netpipe::remote::decode_remote_message_auto(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        auto decoded = decode_res.value();
+        CHECK(decoded.version == netpipe::remote::PROTOCOL_VERSION_2);
+        CHECK(decoded.request_id == request_id);
+        CHECK(decoded.method_id == method_id);
+    }
+
+    SUBCASE("Auto-detect V1 protocol (backward compatibility)") {
+        dp::u32 request_id = 400;
+        netpipe::Message payload = {0x11, 0x22, 0x33};
+
+        // Encode with V1 protocol
+        auto encoded = netpipe::remote::encode_remote_message(request_id, payload, false);
+
+        // Auto-detect should recognize V1 and convert to V2 format
+        auto decode_res = netpipe::remote::decode_remote_message_auto(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        auto decoded = decode_res.value();
+        CHECK(decoded.version == netpipe::remote::PROTOCOL_VERSION_1);
+        CHECK(decoded.type == netpipe::remote::MessageType::Response);
+        CHECK(decoded.request_id == request_id);
+        CHECK(decoded.method_id == 0); // V1 doesn't have method_id
+        CHECK(decoded.payload.size() == payload.size());
+    }
+
+    SUBCASE("V2 empty payload") {
+        dp::u32 request_id = 500;
+        dp::u32 method_id = 20;
+        netpipe::Message empty_payload;
+
+        auto encoded = netpipe::remote::encode_remote_message_v2(request_id, method_id, empty_payload);
+        CHECK(encoded.size() == 16); // Just header, no payload
+
+        auto decode_res = netpipe::remote::decode_remote_message_v2(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        auto decoded = decode_res.value();
+        CHECK(decoded.request_id == request_id);
+        CHECK(decoded.method_id == method_id);
+        CHECK(decoded.payload.size() == 0);
+    }
+
+    SUBCASE("V2 large method_id") {
+        dp::u32 request_id = 600;
+        dp::u32 method_id = 0xFFFFFFFF; // Max u32
+        netpipe::Message payload = {0xAB};
+
+        auto encoded = netpipe::remote::encode_remote_message_v2(request_id, method_id, payload);
+        auto decode_res = netpipe::remote::decode_remote_message_v2(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        CHECK(decode_res.value().method_id == method_id);
+    }
+}
