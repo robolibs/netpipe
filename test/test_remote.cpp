@@ -20,18 +20,26 @@ TEST_CASE("Remote - Basic call/serve functionality") {
             netpipe::Remote remote(*client_stream);
 
             // Echo handler
-            auto handler = [](const netpipe::Message &request) -> netpipe::Message {
-                return request; // Echo back
+            auto handler = [](const netpipe::Message &request) -> dp::Res<netpipe::Message> {
+                return dp::result::ok(request); // Echo back
             };
 
-            // Serve one request then exit
+            // Serve one request then exit (manually to avoid infinite loop)
             auto recv_res = client_stream->recv();
             if (recv_res.is_ok()) {
                 auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
                 if (decode_res.is_ok()) {
-                    auto [request_id, request_payload] = decode_res.value();
-                    auto response_payload = handler(request_payload);
-                    auto response = netpipe::remote::encode_remote_message(request_id, response_payload);
+                    auto decoded = decode_res.value();
+                    auto handler_res = handler(decoded.payload);
+                    netpipe::Message response;
+                    if (handler_res.is_ok()) {
+                        response =
+                            netpipe::remote::encode_remote_message(decoded.request_id, handler_res.value(), false);
+                    } else {
+                        netpipe::Message error_msg(handler_res.error().message.begin(),
+                                                   handler_res.error().message.end());
+                        response = netpipe::remote::encode_remote_message(decoded.request_id, error_msg, true);
+                    }
                     client_stream->send(response);
                 }
             }
@@ -76,12 +84,12 @@ TEST_CASE("Remote - Basic call/serve functionality") {
             netpipe::Remote remote(*client_stream);
 
             // Handler that increments each byte
-            auto handler = [](const netpipe::Message &request) -> netpipe::Message {
+            auto handler = [](const netpipe::Message &request) -> dp::Res<netpipe::Message> {
                 netpipe::Message response = request;
                 for (auto &byte : response) {
                     byte++;
                 }
-                return response;
+                return dp::result::ok(response);
             };
 
             // Serve 3 requests
@@ -90,10 +98,13 @@ TEST_CASE("Remote - Basic call/serve functionality") {
                 if (recv_res.is_ok()) {
                     auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
                     if (decode_res.is_ok()) {
-                        auto [request_id, request_payload] = decode_res.value();
-                        auto response_payload = handler(request_payload);
-                        auto response = netpipe::remote::encode_remote_message(request_id, response_payload);
-                        client_stream->send(response);
+                        auto decoded = decode_res.value();
+                        auto handler_res = handler(decoded.payload);
+                        if (handler_res.is_ok()) {
+                            auto response =
+                                netpipe::remote::encode_remote_message(decoded.request_id, handler_res.value());
+                            client_stream->send(response);
+                        }
                     }
                 }
             }
@@ -142,8 +153,8 @@ TEST_CASE("Remote - Timeout behavior") {
             if (recv_res.is_ok()) {
                 auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
                 if (decode_res.is_ok()) {
-                    auto [request_id, request_payload] = decode_res.value();
-                    auto response = netpipe::remote::encode_remote_message(request_id, request_payload);
+                    auto decoded = decode_res.value();
+                    auto response = netpipe::remote::encode_remote_message(decoded.request_id, decoded.payload);
                     client_stream->send(response);
                 }
             }
@@ -225,9 +236,9 @@ TEST_CASE("Remote - Request ID matching") {
             if (recv_res.is_ok()) {
                 auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
                 if (decode_res.is_ok()) {
-                    auto [request_id, request_payload] = decode_res.value();
+                    auto decoded = decode_res.value();
                     // Echo back with same request_id
-                    auto response = netpipe::remote::encode_remote_message(request_id, request_payload);
+                    auto response = netpipe::remote::encode_remote_message(decoded.request_id, decoded.payload);
                     client_stream->send(response);
                 }
             }
@@ -267,9 +278,9 @@ TEST_CASE("Remote - Request ID matching") {
             if (recv_res.is_ok()) {
                 auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
                 if (decode_res.is_ok()) {
-                    auto [request_id, request_payload] = decode_res.value();
+                    auto decoded = decode_res.value();
                     // Send response with WRONG request_id
-                    auto response = netpipe::remote::encode_remote_message(request_id + 999, request_payload);
+                    auto response = netpipe::remote::encode_remote_message(decoded.request_id + 999, decoded.payload);
                     client_stream->send(response);
                 }
             }
@@ -313,9 +324,9 @@ TEST_CASE("Remote - Large message handling") {
             if (recv_res.is_ok()) {
                 auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
                 if (decode_res.is_ok()) {
-                    auto [request_id, request_payload] = decode_res.value();
+                    auto decoded = decode_res.value();
                     // Echo back
-                    auto response = netpipe::remote::encode_remote_message(request_id, request_payload);
+                    auto response = netpipe::remote::encode_remote_message(decoded.request_id, decoded.payload);
                     client_stream->send(response);
                 }
             }
@@ -372,7 +383,7 @@ TEST_CASE("Remote - Error handling") {
 
     SUBCASE("Malformed message causes decode error") {
         // This test verifies protocol decode error handling
-        netpipe::Message malformed = {0x00, 0x01}; // Too short (< 8 bytes)
+        netpipe::Message malformed = {0x00, 0x01}; // Too short (< 9 bytes)
 
         auto decode_res = netpipe::remote::decode_remote_message(malformed);
         CHECK(decode_res.is_err());
@@ -386,6 +397,9 @@ TEST_CASE("Remote - Error handling") {
         msg.push_back(0x00);
         msg.push_back(0x00);
         msg.push_back(0x00);
+        msg.push_back(0x00);
+
+        // is_error = 0
         msg.push_back(0x00);
 
         // length = 10 (but we only provide 2 bytes)
@@ -410,18 +424,19 @@ TEST_CASE("Remote - Protocol encoding/decoding") {
 
         auto encoded = netpipe::remote::encode_remote_message(request_id, payload);
 
-        // Verify encoded format: [request_id:4][length:4][payload:N]
-        CHECK(encoded.size() == 8 + payload.size());
+        // Verify encoded format: [request_id:4][is_error:1][length:4][payload:N]
+        CHECK(encoded.size() == 9 + payload.size());
 
         auto decode_res = netpipe::remote::decode_remote_message(encoded);
         REQUIRE(decode_res.is_ok());
 
-        auto [decoded_id, decoded_payload] = decode_res.value();
-        CHECK(decoded_id == request_id);
-        CHECK(decoded_payload.size() == payload.size());
+        auto decoded = decode_res.value();
+        CHECK(decoded.request_id == request_id);
+        CHECK(decoded.is_error == false);
+        CHECK(decoded.payload.size() == payload.size());
 
         for (dp::usize i = 0; i < payload.size(); i++) {
-            CHECK(decoded_payload[i] == payload[i]);
+            CHECK(decoded.payload[i] == payload[i]);
         }
     }
 
@@ -430,13 +445,104 @@ TEST_CASE("Remote - Protocol encoding/decoding") {
         netpipe::Message empty_payload;
 
         auto encoded = netpipe::remote::encode_remote_message(request_id, empty_payload);
-        CHECK(encoded.size() == 8); // Just header, no payload
+        CHECK(encoded.size() == 9); // Header with is_error flag, no payload
 
         auto decode_res = netpipe::remote::decode_remote_message(encoded);
         REQUIRE(decode_res.is_ok());
 
-        auto [decoded_id, decoded_payload] = decode_res.value();
-        CHECK(decoded_id == 0);
-        CHECK(decoded_payload.size() == 0);
+        auto decoded = decode_res.value();
+        CHECK(decoded.request_id == 0);
+        CHECK(decoded.is_error == false);
+        CHECK(decoded.payload.size() == 0);
+    }
+
+    SUBCASE("Error response encoding") {
+        dp::u32 request_id = 42;
+        dp::String error_msg("Something went wrong");
+        netpipe::Message error_payload(error_msg.begin(), error_msg.end());
+
+        auto encoded = netpipe::remote::encode_remote_message(request_id, error_payload, true);
+
+        auto decode_res = netpipe::remote::decode_remote_message(encoded);
+        REQUIRE(decode_res.is_ok());
+
+        auto decoded = decode_res.value();
+        CHECK(decoded.request_id == 42);
+        CHECK(decoded.is_error == true);
+        CHECK(decoded.payload.size() == error_msg.size());
+
+        dp::String decoded_error(reinterpret_cast<const char *>(decoded.payload.data()), decoded.payload.size());
+        CHECK(decoded_error == error_msg);
+    }
+}
+
+TEST_CASE("Remote - Handler error responses") {
+    SUBCASE("Handler returns error") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18008};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread with error-returning handler
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            netpipe::Remote remote(*client_stream);
+
+            // Handler that returns error for certain requests
+            auto handler = [](const netpipe::Message &request) -> dp::Res<netpipe::Message> {
+                if (request.size() > 0 && request[0] == 0xFF) {
+                    return dp::result::err(dp::Error::invalid_argument("Invalid request byte"));
+                }
+                return dp::result::ok(request);
+            };
+
+            // Serve two requests
+            for (int i = 0; i < 2; i++) {
+                auto recv_res = client_stream->recv();
+                if (recv_res.is_ok()) {
+                    auto decode_res = netpipe::remote::decode_remote_message(recv_res.value());
+                    if (decode_res.is_ok()) {
+                        auto decoded = decode_res.value();
+                        auto handler_res = handler(decoded.payload);
+                        netpipe::Message response;
+                        if (handler_res.is_ok()) {
+                            response =
+                                netpipe::remote::encode_remote_message(decoded.request_id, handler_res.value(), false);
+                        } else {
+                            netpipe::Message error_msg(handler_res.error().message.begin(),
+                                                       handler_res.error().message.end());
+                            response = netpipe::remote::encode_remote_message(decoded.request_id, error_msg, true);
+                        }
+                        client_stream->send(response);
+                    }
+                }
+            }
+        });
+
+        // Client
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::Remote remote(client);
+
+        // First call - should succeed
+        netpipe::Message good_request = {0x01, 0x02};
+        auto call_res1 = remote.call(good_request, 1000);
+        CHECK(call_res1.is_ok());
+
+        // Second call - should fail with error
+        netpipe::Message bad_request = {0xFF};
+        auto call_res2 = remote.call(bad_request, 1000);
+        CHECK(call_res2.is_err());
+
+        client.close();
+        server_thread.join();
+        server.close();
     }
 }

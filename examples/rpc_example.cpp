@@ -28,13 +28,20 @@ void server() {
     netpipe::Remote remote(*client);
 
     // Handler: echo back the request with "Response: " prefix
-    auto handler = [](const netpipe::Message &request) -> netpipe::Message {
-        dp::String req_str(reinterpret_cast<const char *>(request.data()));
+    // Returns error if request contains "error"
+    auto handler = [](const netpipe::Message &request) -> dp::Res<netpipe::Message> {
+        dp::String req_str(reinterpret_cast<const char *>(request.data()), request.size());
         echo::info("Handling request: ", req_str.c_str());
+
+        // Simulate error handling - return error if request contains "error"
+        if (req_str.find("error") != dp::String::npos) {
+            echo::warn("Request contains 'error', returning error response");
+            return dp::result::err(dp::Error::invalid_argument("Request contains 'error' keyword"));
+        }
 
         dp::String response_str = dp::String("Response: ") + req_str;
         netpipe::Message response(response_str.begin(), response_str.end());
-        return response;
+        return dp::result::ok(response);
     };
 
     echo::info("Remote RPC server ready, handling requests...");
@@ -62,9 +69,15 @@ void client() {
     // Create Remote RPC client
     netpipe::Remote remote(stream);
 
-    // Make 3 Remote RPC calls
-    for (int i = 0; i < 3; i++) {
-        dp::String req_str = dp::String("Request #") + dp::String(std::to_string(i).c_str());
+    // Make 4 Remote RPC calls (including one that triggers an error)
+    for (int i = 0; i < 4; i++) {
+        dp::String req_str;
+        if (i == 2) {
+            // This request will trigger an error on the server
+            req_str = dp::String("Request with error keyword");
+        } else {
+            req_str = dp::String("Request #") + dp::String(std::to_string(i).c_str());
+        }
         netpipe::Message request(req_str.begin(), req_str.end());
 
         echo::info("Calling Remote RPC: ", req_str.c_str());
@@ -72,12 +85,12 @@ void client() {
 
         if (call_res.is_err()) {
             echo::error("Remote RPC call failed: ", call_res.error().message.c_str());
-            break;
+            // Continue to next request instead of breaking
+        } else {
+            auto response = call_res.value();
+            dp::String resp_str(reinterpret_cast<const char *>(response.data()), response.size());
+            echo::info("Got response: ", resp_str.c_str());
         }
-
-        auto response = call_res.value();
-        dp::String resp_str(reinterpret_cast<const char *>(response.data()));
-        echo::info("Got response: ", resp_str.c_str());
 
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }

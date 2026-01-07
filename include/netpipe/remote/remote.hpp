@@ -61,18 +61,27 @@ namespace netpipe {
                     return dp::result::err(decode_res.error());
                 }
 
-                auto [response_id, response_payload] = decode_res.value();
+                auto decoded = decode_res.value();
 
                 // Verify request_id matches
-                if (response_id != request_id) {
-                    echo::error("remote request_id mismatch: expected ", request_id, " got ", response_id);
+                if (decoded.request_id != request_id) {
+                    echo::error("remote request_id mismatch: expected ", request_id, " got ", decoded.request_id);
                     return dp::result::err(dp::Error::invalid_argument("request_id mismatch"));
                 }
 
-                echo::trace("remote response id=", response_id, " len=", response_payload.size());
+                // Check if response is an error
+                if (decoded.is_error) {
+                    echo::error("remote call returned error");
+                    // Payload contains error message
+                    dp::String error_msg(reinterpret_cast<const char *>(decoded.payload.data()),
+                                         decoded.payload.size());
+                    return dp::result::err(dp::Error::io_error(error_msg.c_str()));
+                }
+
+                echo::trace("remote response id=", decoded.request_id, " len=", decoded.payload.size());
                 echo::debug("remote call completed");
 
-                return dp::result::ok(std::move(response_payload));
+                return dp::result::ok(std::move(decoded.payload));
             }
 
             /// Server side: loop handling requests
@@ -98,15 +107,24 @@ namespace netpipe {
                         return dp::result::err(decode_res.error());
                     }
 
-                    auto [request_id, request_payload] = decode_res.value();
-                    echo::trace("remote serve handling request id=", request_id, " len=", request_payload.size());
-                    echo::debug("remote serve handling request id=", request_id);
+                    auto decoded = decode_res.value();
+                    echo::trace("remote serve handling request id=", decoded.request_id,
+                                " len=", decoded.payload.size());
+                    echo::debug("remote serve handling request id=", decoded.request_id);
 
                     // Call handler
-                    Message response_payload = handler(request_payload);
+                    auto handler_res = handler(decoded.payload);
 
-                    // Encode response
-                    Message remote_response = encode_remote_message(request_id, response_payload);
+                    Message remote_response;
+                    if (handler_res.is_err()) {
+                        // Handler returned error - send error response
+                        echo::warn("handler returned error: ", handler_res.error().message.c_str());
+                        Message error_payload(handler_res.error().message.begin(), handler_res.error().message.end());
+                        remote_response = encode_remote_message(decoded.request_id, error_payload, true);
+                    } else {
+                        // Handler succeeded - send success response
+                        remote_response = encode_remote_message(decoded.request_id, handler_res.value(), false);
+                    }
 
                     // Send response
                     auto send_res = stream_.send(remote_response);
@@ -115,8 +133,8 @@ namespace netpipe {
                         return dp::result::err(send_res.error());
                     }
 
-                    echo::trace("remote serve sent response id=", request_id, " len=", response_payload.size());
-                    echo::debug("remote serve completed request id=", request_id);
+                    echo::trace("remote serve sent response id=", decoded.request_id);
+                    echo::debug("remote serve completed request id=", decoded.request_id);
                 }
 
                 return dp::result::ok();
