@@ -19,7 +19,8 @@ namespace netpipe {
             Notification = 3, // One-way message (no response expected)
             StreamData = 4,   // Streaming data chunk
             StreamEnd = 5,    // End of stream
-            StreamError = 6   // Stream error
+            StreamError = 6,  // Stream error
+            Cancel = 7        // Cancel in-flight request
         };
 
         /// Message flags (bitfield)

@@ -18,10 +18,12 @@ namespace netpipe {
             std::mutex mutex;
             std::condition_variable cv;
             bool completed;
+            bool cancelled;
             dp::Res<Message> result;
 
             PendingRequest(dp::u32 id)
-                : request_id(id), completed(false), result(dp::result::err(dp::Error::timeout("timeout"))) {}
+                : request_id(id), completed(false), cancelled(false),
+                  result(dp::result::err(dp::Error::timeout("timeout"))) {}
         };
 
         /// Remote with concurrent request support
@@ -47,6 +49,10 @@ namespace netpipe {
                     // Receive response
                     auto recv_res = stream_.recv();
                     if (recv_res.is_err()) {
+                        // Timeout is expected - just continue to check running_ flag
+                        if (recv_res.error().code == dp::Error::TIMEOUT) {
+                            continue;
+                        }
                         if (running_) {
                             echo::error("remote async recv failed: ", recv_res.error().message.c_str());
                         }
@@ -104,6 +110,8 @@ namespace netpipe {
                 : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent),
                   enable_metrics_(enable_metrics) {
                 echo::trace("RemoteAsync constructed, max_concurrent=", max_concurrent, " metrics=", enable_metrics);
+                // Set receive timeout to allow receiver thread to check running_ flag
+                stream_.set_recv_timeout(100); // 100ms timeout
                 receiver_thread_ = std::thread(&RemoteAsync::receiver_loop, this);
             }
 
@@ -231,6 +239,56 @@ namespace netpipe {
 
             /// Check if metrics are enabled
             bool metrics_enabled() const { return enable_metrics_; }
+
+            /// Cancel an in-flight request
+            /// Returns true if the request was found and cancelled, false otherwise
+            /// Note: If the response has already been received, cancellation will fail
+            bool cancel(dp::u32 request_id) {
+                echo::trace("remote async cancel request id=", request_id);
+
+                // Find and mark pending request as cancelled
+                std::shared_ptr<PendingRequest> pending;
+                {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    auto it = pending_requests_.find(request_id);
+                    if (it == pending_requests_.end()) {
+                        echo::warn("cancel: request_id not found: ", request_id);
+                        return false; // Request not found (already completed or never existed)
+                    }
+                    pending = it->second;
+                }
+
+                // Try to mark as cancelled
+                {
+                    std::lock_guard<std::mutex> lock(pending->mutex);
+                    if (pending->completed) {
+                        echo::trace("cancel: request already completed id=", request_id);
+                        return false; // Already completed
+                    }
+                    pending->cancelled = true;
+                    pending->result = dp::result::err(dp::Error::io_error("request cancelled"));
+                    pending->completed = true;
+                }
+
+                // Notify waiting thread
+                pending->cv.notify_one();
+
+                // Send cancellation message to server (best effort)
+                Message cancel_msg = encode_remote_message_v2(request_id, 0, Message(), MessageType::Cancel);
+                auto send_res = stream_.send(cancel_msg);
+                if (send_res.is_err()) {
+                    echo::warn("cancel: failed to send cancel message id=", request_id);
+                }
+
+                // Remove from pending
+                {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    pending_requests_.erase(request_id);
+                }
+
+                echo::trace("remote async cancelled request id=", request_id);
+                return true;
+            }
         };
 
     } // namespace remote

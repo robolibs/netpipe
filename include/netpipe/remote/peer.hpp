@@ -58,10 +58,13 @@ namespace netpipe {
 
                     auto decoded = decode_res.value();
 
-                    // Determine if this is a request or response
+                    // Determine message type
                     if (decoded.type == MessageType::Request) {
                         // Incoming request - handle it
                         handle_request(decoded);
+                    } else if (decoded.type == MessageType::Cancel) {
+                        // Cancellation request - handle it
+                        handle_cancel(decoded);
                     } else {
                         // Response or error - match with pending request
                         handle_response(decoded);
@@ -167,6 +170,21 @@ namespace netpipe {
                     pending->completed = true;
                 }
                 pending->cv.notify_one();
+            }
+
+            /// Handle cancellation request from peer
+            /// Note: In RemotePeer, we don't track server-side request execution,
+            /// so we just log the cancellation. A full implementation would need
+            /// to track handler execution and interrupt it.
+            void handle_cancel(const DecodedMessageV2 &decoded) {
+                dp::u32 request_id = decoded.request_id;
+                echo::trace("remote peer received cancel request id=", request_id);
+                // In a full implementation, we would:
+                // 1. Find the handler execution for this request_id
+                // 2. Set a cancellation flag
+                // 3. The handler would check this flag periodically
+                // For now, we just log it
+                echo::debug("cancel request received for id=", request_id, " (handler cancellation not implemented)");
             }
 
           public:
@@ -320,6 +338,56 @@ namespace netpipe {
 
             /// Check if metrics are enabled
             bool metrics_enabled() const { return enable_metrics_; }
+
+            /// Cancel an in-flight request
+            /// Returns true if the request was found and cancelled, false otherwise
+            /// Note: If the response has already been received, cancellation will fail
+            bool cancel(dp::u32 request_id) {
+                echo::trace("remote peer cancel request id=", request_id);
+
+                // Find and mark pending request as cancelled
+                std::shared_ptr<PendingRequest> pending;
+                {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    auto it = pending_requests_.find(request_id);
+                    if (it == pending_requests_.end()) {
+                        echo::warn("cancel: request_id not found: ", request_id);
+                        return false; // Request not found (already completed or never existed)
+                    }
+                    pending = it->second;
+                }
+
+                // Try to mark as cancelled
+                {
+                    std::lock_guard<std::mutex> lock(pending->mutex);
+                    if (pending->completed) {
+                        echo::trace("cancel: request already completed id=", request_id);
+                        return false; // Already completed
+                    }
+                    pending->cancelled = true;
+                    pending->result = dp::result::err(dp::Error::io_error("request cancelled"));
+                    pending->completed = true;
+                }
+
+                // Notify waiting thread
+                pending->cv.notify_one();
+
+                // Send cancellation message to peer (best effort)
+                Message cancel_msg = encode_remote_message_v2(request_id, 0, Message(), MessageType::Cancel);
+                auto send_res = stream_.send(cancel_msg);
+                if (send_res.is_err()) {
+                    echo::warn("cancel: failed to send cancel message id=", request_id);
+                }
+
+                // Remove from pending
+                {
+                    std::lock_guard<std::mutex> lock(pending_mutex_);
+                    pending_requests_.erase(request_id);
+                }
+
+                echo::trace("remote peer cancelled request id=", request_id);
+                return true;
+            }
         };
 
     } // namespace remote
