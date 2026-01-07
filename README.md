@@ -1,587 +1,399 @@
 # Netpipe
 
-**Netpipe** is a minimal peer-to-peer transport library for C++20 with honest semantics. It provides two transport families (Stream and Datagram) with multiple implementations, plus an RPC layer on top.
+Minimal peer-to-peer transport library for C++20 with honest semantics and modern Remote RPC.
 
-## Features
+## Development Status
 
-- **Header-only** - No linking required, just include and use
-- **Two transport families**:
-  - **Stream**: Reliable, ordered, connection-oriented (TCP, IPC, SHM)
-  - **Datagram**: Unreliable, connectionless (UDP, LoRa)
-- **Honest semantics** - No leaky abstractions, different transports behave differently
-- **Blocking API** - Users handle async themselves (threads, futures, etc.)
+See [TODO.md](./TODO.md) for the complete development plan and current progress.
+
+## Overview
+
+**Netpipe** provides two transport families (Stream and Datagram) with multiple implementations, plus a feature-complete Remote RPC layer. It's designed with honest semantics - different transports behave differently, no leaky abstractions.
+
+**Key Features:**
+- **Header-only** - No linking required
+- **Two transport families** - Stream (reliable, ordered) and Datagram (unreliable, connectionless)
+- **Modern Remote RPC** - Routing, streaming, metrics, cancellation, bidirectional
+- **Honest semantics** - TCP ≠ UDP ≠ SHM, each behaves as expected
 - **No exceptions** - All errors via `dp::Result<T, Error>`
-- **Comprehensive logging** - Uses `echo` library with compile-time filtering
 - **Modern C++20** - Uses `datapod` types throughout
 
-## Transport Implementations
+### Architecture
 
-### Stream (Reliable, Ordered, Connection-Oriented)
-
-| Transport | Description | Use Case |
-|-----------|-------------|----------|
-| **TcpStream** | TCP/IP sockets with length-prefix framing | Network communication |
-| **IpcStream** | Unix domain sockets | Local inter-process communication |
-| **ShmStream** | POSIX shared memory with lock-free ring buffer | High-performance local IPC |
-
-### Datagram (Unreliable, Connectionless)
-
-| Transport | Description | Use Case |
-|-----------|-------------|----------|
-| **UdpDatagram** | UDP/IP with broadcast support | Local network discovery, multicast |
-| **LoraDatagram** | LoRa mesh via melodi serial protocol | Long-range wireless mesh networks |
-
-### Higher-Level Protocols
-
-| Protocol | Description | Use Case |
-|----------|-------------|----------|
-| **Rpc** | Request/response RPC over any Stream | Client-server applications |
-
-## Quick Start
-
-### Installation
-
-Netpipe is header-only. Just include it in your project:
-
-```cpp
-#include <netpipe/netpipe.hpp>
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              NETPIPE                                     │
+├──────────────────────┬──────────────────────┬───────────────────────────┤
+│   Remote RPC Layer   │                      │                           │
+│  ┌────────────────┐  │                      │                           │
+│  │ RemoteRouter   │  │  Stream Family       │   Datagram Family         │
+│  │ RemoteAsync    │  │  (Reliable)          │   (Unreliable)            │
+│  │ RemotePeer     │  │                      │                           │
+│  │ Streaming      │  │  ┌──────────────┐    │   ┌──────────────┐        │
+│  │ TypedRemote    │  │  │  TcpStream   │    │   │ UdpDatagram  │        │
+│  │ Metrics        │  │  │  IpcStream   │    │   │ LoraDatagram │        │
+│  └────────────────┘  │  │  ShmStream   │    │   └──────────────┘        │
+│                      │  └──────────────┘    │                           │
+└──────────────────────┴──────────────────────┴───────────────────────────┘
+           │                      │                        │
+           └──────────────────────┴────────────────────────┘
+                                  │
+                          ┌───────▼────────┐
+                          │   Your App     │
+                          └────────────────┘
 ```
 
-### Dependencies
+**Remote Protocol Evolution:**
+```
+V1 (Legacy):  [request_id:4][is_error:1][length:4][payload:N]  (9 bytes)
+              └─ Basic request/response
 
-- **datapod** - Types and error handling (`dp::Vector`, `dp::Result`, `dp::Error`, etc.)
-- **echo** - Logging with compile-time filtering
-
-### TCP Echo Server
-
-```cpp
-#include <netpipe/stream/tcp.hpp>
-
-int main() {
-    netpipe::TcpStream server;
-    netpipe::TcpEndpoint endpoint{"0.0.0.0", 7447};
-
-    // Start listening
-    auto res = server.listen(endpoint);
-    if (res.is_err()) {
-        echo::error("Failed to listen: ", res.error().message.c_str());
-        return 1;
-    }
-
-    // Accept connection
-    auto client_res = server.accept();
-    if (client_res.is_err()) {
-        echo::error("Failed to accept: ", client_res.error().message.c_str());
-        return 1;
-    }
-
-    auto client = std::move(client_res.value());
-
-    // Echo loop
-    while (true) {
-        auto msg_res = client->recv();
-        if (msg_res.is_err()) break;
-        
-        auto msg = msg_res.value();
-        client->send(msg);
-    }
-
-    return 0;
-}
+V2 (Current): [version:1][type:1][flags:2][request_id:4][method_id:4][length:4][payload:N]  (16 bytes)
+              └─ Routing, streaming, metrics, cancellation
 ```
 
-### TCP Echo Client
+## Installation
 
-```cpp
-#include <netpipe/stream/tcp.hpp>
+### Quick Start (CMake FetchContent)
 
-int main() {
-    netpipe::TcpStream stream;
-    netpipe::TcpEndpoint endpoint{"127.0.0.1", 7447};
+```cmake
+include(FetchContent)
+FetchContent_Declare(
+  netpipe
+  GIT_REPOSITORY https://github.com/robolibs/netpipe
+  GIT_TAG main
+)
+FetchContent_MakeAvailable(netpipe)
 
-    // Connect to server
-    auto res = stream.connect(endpoint);
-    if (res.is_err()) {
-        echo::error("Connect failed: ", res.error().message.c_str());
-        return 1;
-    }
-
-    // Send message
-    netpipe::Message msg = {0x48, 0x65, 0x6c, 0x6c, 0x6f}; // "Hello"
-    stream.send(msg);
-
-    // Receive echo
-    auto recv_res = stream.recv();
-    if (recv_res.is_ok()) {
-        auto echo_msg = recv_res.value();
-        // Process echo_msg
-    }
-
-    return 0;
-}
+target_link_libraries(your_target PRIVATE netpipe)
 ```
 
-### UDP Broadcast
+### Recommended: XMake
 
-```cpp
-#include <netpipe/datagram/udp.hpp>
+[XMake](https://xmake.io/) is a modern, fast, and cross-platform build system.
 
-int main() {
-    netpipe::UdpDatagram udp;
-    netpipe::UdpEndpoint local{"0.0.0.0", 9000};
-    
-    auto res = udp.bind(local);
-    if (res.is_err()) return 1;
-
-    // Send broadcast
-    netpipe::UdpEndpoint broadcast{"255.255.255.255", 9000};
-    netpipe::Message msg = {0x01, 0x02, 0x03};
-    udp.send_to(msg, broadcast);
-
-    // Receive from anyone
-    auto recv_res = udp.recv_from();
-    if (recv_res.is_ok()) {
-        auto [msg, sender] = recv_res.value();
-        echo::info("Received from ", sender.host.c_str(), ":", sender.port);
-    }
-
-    return 0;
-}
+**Install XMake:**
+```bash
+curl -fsSL https://xmake.io/shget.text | bash
 ```
 
-### RPC Example
+**Add to your xmake.lua:**
+```lua
+add_requires("netpipe")
+
+target("your_target")
+    set_kind("binary")
+    add_packages("netpipe")
+    add_files("src/*.cpp")
+```
+
+**Build:**
+```bash
+xmake
+xmake run
+```
+
+## Usage
+
+### Basic TCP Echo
 
 ```cpp
 #include <netpipe/netpipe.hpp>
 
 // Server
-void server() {
-    netpipe::TcpStream stream;
-    stream.listen({"0.0.0.0", 8080});
-    auto client = stream.accept().value();
-    
-    netpipe::Rpc rpc(*client);
-    
-    auto handler = [](const netpipe::Message& req) -> netpipe::Message {
-        // Process request, return response
-        return req; // Echo
-    };
-    
-    rpc.serve(handler);
+netpipe::TcpStream server;
+server.listen({"0.0.0.0", 7447});
+auto client = server.accept().value();
+
+while (true) {
+    auto msg = client->recv();
+    if (msg.is_ok()) client->send(msg.value());
 }
 
 // Client
-void client() {
-    netpipe::TcpStream stream;
-    stream.connect({"127.0.0.1", 8080});
-    
-    netpipe::Rpc rpc(stream);
-    
-    netpipe::Message request = {0x01, 0x02};
-    auto response = rpc.call(request, 5000); // 5 second timeout
-    
-    if (response.is_ok()) {
-        // Process response
-    }
-}
+netpipe::TcpStream stream;
+stream.connect({"127.0.0.1", 7447});
+netpipe::Message msg = {0x48, 0x65, 0x6c, 0x6c, 0x6f}; // "Hello"
+stream.send(msg);
+auto echo = stream.recv().value();
 ```
 
-## API Reference
-
-### Common Types
+### Remote RPC with Method Routing
 
 ```cpp
-namespace netpipe {
-    // Message type - vector of bytes
-    using Message = dp::Vector<dp::u8>;
-    
-    // Result types
-    template<typename T>
-    using Res = dp::Res<T>;
-    using VoidRes = dp::VoidRes;
-}
-```
-
-### Endpoints
-
-```cpp
-// TCP/UDP endpoint
-struct TcpEndpoint {
-    dp::String host;  // IP address or hostname
-    dp::u16 port;     // Port number
-};
-using UdpEndpoint = TcpEndpoint;
-
-// IPC endpoint
-struct IpcEndpoint {
-    dp::String path;  // Unix socket path
-};
-
-// Shared memory endpoint
-struct ShmEndpoint {
-    dp::String name;  // Shared memory name
-    dp::usize size;   // Buffer size in bytes
-};
-
-// LoRa endpoint
-struct LoraEndpoint {
-    dp::String device;  // Serial device path (e.g., "/dev/ttyUSB0")
-    dp::String address; // IPv6 address for routing
-};
-```
-
-### Stream Interface
-
-All stream implementations provide:
-
-```cpp
-class Stream {
-    // Server operations
-    virtual VoidRes listen(const Endpoint& endpoint) = 0;
-    virtual Res<dp::Box<Stream>> accept() = 0;
-    
-    // Client operations
-    virtual VoidRes connect(const Endpoint& endpoint) = 0;
-    
-    // I/O operations
-    virtual Res<Message> recv() = 0;
-    virtual VoidRes send(const Message& msg) = 0;
-    
-    // Lifecycle
-    virtual VoidRes close() = 0;
-    virtual bool is_connected() const = 0;
-};
-```
-
-### Datagram Interface
-
-All datagram implementations provide:
-
-```cpp
-class Datagram {
-    // Bind to local endpoint
-    virtual VoidRes bind(const Endpoint& endpoint) = 0;
-    
-    // I/O operations
-    virtual Res<dp::Pair<Message, Endpoint>> recv_from() = 0;
-    virtual VoidRes send_to(const Message& msg, const Endpoint& endpoint) = 0;
-    
-    // Lifecycle
-    virtual VoidRes close() = 0;
-    virtual bool is_bound() const = 0;
-};
-```
-
-### RPC Interface
-
-```cpp
-class Rpc {
-    // Constructor takes any Stream
-    explicit Rpc(Stream& stream);
-    
-    // Client: Make RPC call with timeout (milliseconds)
-    Res<Message> call(const Message& request, dp::u32 timeout_ms);
-    
-    // Server: Handle requests with handler function
-    template<typename Handler>
-    VoidRes serve(Handler handler);
-};
-```
-
-## Wire Formats
-
-### Stream Framing (TCP, IPC, SHM)
-
-All stream transports use 4-byte big-endian length prefix:
-
-```
-[length:4 bytes][payload:N bytes]
-```
-
-### RPC Wire Format
-
-RPC messages include request ID for matching:
-
-```
-[request_id:4 bytes][length:4 bytes][payload:N bytes]
-```
-
-### LoRa Melodi Protocol
-
-Uses serial protocol at 115200 baud:
-
-```
-TX <ipv6_addr> <hex_payload>
-RX <ipv6_addr> <hex_payload>
-```
-
-Messages are fragmented to 128 bytes max.
-
-## Error Handling
-
-All operations return `dp::Res<T>` or `dp::VoidRes`:
-
-```cpp
-auto res = stream.connect(endpoint);
-if (res.is_err()) {
-    echo::error("Error: ", res.error().message.c_str());
-    return;
-}
-
-// Or unwrap (panics on error)
-stream.connect(endpoint).unwrap();
-```
-
-Common error types:
-- `dp::Error::io_error()` - I/O operation failed
-- `dp::Error::timeout()` - Operation timed out
-- `dp::Error::invalid_argument()` - Invalid parameter
-- `dp::Error::not_found()` - Resource not found
-
-## Logging
-
-Netpipe uses the `echo` library with compile-time filtering:
-
-```cpp
-// Set log level at compile time
-#define LOGLEVEL Debug
 #include <netpipe/netpipe.hpp>
 
-// Log levels (from most to least verbose):
-echo::trace()  // Internal details (socket ops, byte counts)
-echo::debug()  // State changes (connected, disconnected)
-echo::info()   // Significant events (server started)
-echo::warn()   // Recoverable issues
-echo::error()  // Failures
+// Server
+netpipe::TcpStream stream;
+stream.listen({"0.0.0.0", 8080});
+auto client = stream.accept().value();
+
+netpipe::RemoteRouter router(*client);
+
+// Register multiple methods
+router.register_method(1, [](const netpipe::Message& req) -> dp::Res<netpipe::Message> {
+    return dp::result::ok(req); // Echo
+});
+
+router.register_method(2, [](const netpipe::Message& req) -> dp::Res<netpipe::Message> {
+    netpipe::Message result = {req[0] + req[1]}; // Add
+    return dp::result::ok(result);
+});
+
+router.serve();
+
+// Client
+netpipe::TcpStream stream;
+stream.connect({"127.0.0.1", 8080});
+
+netpipe::RemoteAsync remote(stream);
+
+auto resp1 = remote.call(1, {0x01, 0x02}, 5000); // Echo
+auto resp2 = remote.call(2, {5, 10}, 5000);      // Add -> 15
+```
+
+### Bidirectional Remote (Peer-to-Peer)
+
+```cpp
+// Both peers can call each other!
+netpipe::RemotePeer peer(stream);
+
+// Register methods (server side)
+peer.register_method(1, [](const netpipe::Message& req) -> dp::Res<netpipe::Message> {
+    return dp::result::ok(req);
+});
+
+// Make calls (client side)
+auto response = peer.call(2, {0x01}, 5000);
+```
+
+### Remote with Metrics
+
+```cpp
+// Enable metrics
+netpipe::RemoteAsync remote(stream, 100, true); // max_concurrent=100, metrics=true
+
+remote.call(1, request, 5000);
+
+// Get metrics
+const auto& metrics = remote.get_metrics();
+echo::info("Total: ", metrics.total_requests.load());
+echo::info("Success rate: ", metrics.success_rate() * 100, "%");
+echo::info("Avg latency: ", metrics.avg_latency_us(), " μs");
+echo::info("In-flight: ", metrics.in_flight_requests.load());
+```
+
+### Streaming Remote
+
+```cpp
+netpipe::StreamingRemote streaming(stream);
+
+// Client streaming: multiple requests → one response
+dp::Vector<netpipe::Message> chunks = {{0x01}, {0x02}, {0x03}};
+auto result = streaming.client_stream(1, chunks, 5000);
+
+// Server streaming: one request → multiple responses
+streaming.server_stream(2, request, [](const netpipe::Message& chunk) {
+    echo::info("Chunk: ", chunk.size(), " bytes");
+}, 10000);
+
+// Bidirectional streaming
+auto stream_id = streaming.bidirectional_stream(3, [](const netpipe::Message& chunk) {
+    // Receive chunks
+}).value();
+
+streaming.send_chunk(stream_id, {0x01, 0x02});
+streaming.send_chunk(stream_id, {0x03, 0x04}, true); // final
+streaming.end_stream(stream_id);
+```
+
+### Type-Safe Remote
+
+```cpp
+struct Point {
+    int x, y;
+    auto members() { return std::tie(x, y); }
+};
+
+netpipe::TypedRemote<Point> remote(stream);
+
+Point request{10, 20};
+auto response = remote.call(1, request, 5000);
+
+if (response.is_ok()) {
+    Point result = response.value();
+    // result.x, result.y
+}
+```
+
+### Request Cancellation
+
+```cpp
+netpipe::RemoteAsync remote(stream);
+
+std::thread call_thread([&]() {
+    auto resp = remote.call(1, request, 30000);
+    if (resp.is_err() && resp.error().message == "request cancelled") {
+        echo::info("Cancelled!");
+    }
+});
+
+bool cancelled = remote.cancel(0); // request_id = 0
+call_thread.join();
+```
+
+### Protocol Version Compatibility
+
+```cpp
+// V2 (current) - full features
+netpipe::RemoteAsync remote(stream);
+remote.call(method_id, request, timeout);
+
+// V1 (legacy) - backward compatible
+netpipe::Remote remote(stream);
+remote.call(request, timeout); // No method_id, single handler
+
+// Auto-detection works transparently
+// V1 clients can talk to V2 servers and vice versa
+```
+
+## Features
+
+- **Multiple Transports**
+  - **TcpStream** - Network communication with length-prefix framing
+  - **IpcStream** - Unix domain sockets for local IPC
+  - **ShmStream** - Zero-copy shared memory with lock-free ring buffer
+  - **UdpDatagram** - UDP with broadcast support
+  - **LoraDatagram** - LoRa mesh via melodi serial protocol
+
+- **Modern Remote RPC**
+  - **Method routing** - Multiple methods per service
+  - **Concurrent requests** - Out-of-order responses, thread-safe
+  - **Bidirectional** - Peer-to-peer, both sides call each other
+  - **Streaming** - Client, server, and bidirectional streaming
+  - **Type-safe** - Serialization helpers for custom types
+  - **Metrics** - Latency, success rate, in-flight tracking
+  - **Cancellation** - Cancel in-flight requests
+  - **Versioned protocol** - V1/V2 auto-detection, backward compatible
+
+- **Design Philosophy**
+  - **Honest semantics** - TCP ≠ UDP ≠ SHM, no false abstractions
+  - **Blocking API** - Users handle async (threads, futures, etc.)
+  - **No exceptions** - All errors via `dp::Result<T, Error>`
+  - **Header-only** - Just include and use
+  - **Modern C++20** - Uses `datapod` types, `echo` logging
+
+## Building
+
+```bash
+make config   # Configure build
+make build    # Build library and examples
+make test     # Run tests (15 test suites, 284+ assertions)
+make clean    # Clean build artifacts
+```
+
+**Build system options:**
+```bash
+BUILD_SYSTEM=cmake make build   # Use CMake
+BUILD_SYSTEM=xmake make build   # Use XMake (default)
+BUILD_SYSTEM=zig make build     # Use Zig
 ```
 
 ## Examples
 
 The `examples/` directory contains:
-
-- **tcp_echo_server.cpp** - TCP echo server
-- **tcp_echo_client.cpp** - TCP echo client
+- **rpc_example.cpp** - Remote client/server with routing
+- **tcp_echo_server.cpp** / **tcp_echo_client.cpp** - Basic TCP
 - **udp_broadcast.cpp** - UDP broadcast sender/receiver
-- **rpc_example.cpp** - RPC client/server
-- **ethernet_tunnel.cpp** - Wirebit Ethernet L2 tunneling over TCP (simulation with ShmLink)
-- **tap_tunnel.cpp** - **REAL Linux TAP interfaces** - Creates actual network interfaces visible to OS!
+- **ethernet_tunnel.cpp** - Wirebit Ethernet L2 tunneling
+- **tap_tunnel.cpp** - Real Linux TAP interfaces (requires sudo)
 
-Build examples:
-
+**Run examples:**
 ```bash
-make build
-```
-
-Run examples:
-
-```bash
-# TCP echo
-./build/linux/x86_64/release/tcp_echo_server
-./build/linux/x86_64/release/tcp_echo_client
-
-# UDP broadcast
-./build/linux/x86_64/release/udp_broadcast
-
-# RPC
 ./build/linux/x86_64/release/rpc_example server
 ./build/linux/x86_64/release/rpc_example client
-
-# Ethernet tunnel (simulation - requires wirebit)
-./build/linux/x86_64/release/ethernet_tunnel server
-./build/linux/x86_64/release/ethernet_tunnel client
-
-# TAP tunnel (REAL hardware - requires sudo and wirebit)
-sudo ./build/linux/x86_64/release/tap_tunnel server
-sudo ./build/linux/x86_64/release/tap_tunnel client
-# Then try: ping 10.0.0.2, sudo tcpdump -i tap0, ip link show tap0
 ```
 
-## Building
+## Wire Protocol
 
-Netpipe supports multiple build systems:
+**Protocol V2** (Current):
+```
+[version:1][type:1][flags:2][request_id:4][method_id:4][length:4][payload:N]
 
-### XMake (Recommended)
-
-```bash
-make config   # Configure build
-make build    # Build library and examples
-make test     # Run tests
-make clean    # Clean build artifacts
+version: 1=V1, 2=V2
+type: 0=Request, 1=Response, 2=Error, 4=StreamData, 5=StreamEnd, 6=StreamError, 7=Cancel
+flags: 0x0001=Compressed, 0x0002=Streaming, 0x0004=RequiresAck, 0x0008=Final
 ```
 
-### CMake
-
-```bash
-BUILD_SYSTEM=cmake make config
-BUILD_SYSTEM=cmake make build
+**Protocol V1** (Legacy, backward compatible):
+```
+[request_id:4][is_error:1][length:4][payload:N]
 ```
 
-### Zig
+V1 messages are auto-detected and converted to V2 internally.
 
-```bash
-BUILD_SYSTEM=zig make build
-```
+## API Reference
 
-## Testing
-
-Run tests:
-
-```bash
-make test
-```
-
-Run specific test:
-
-```bash
-make test TEST=test_common
-```
-
-## Integration with Wirebit
-
-Netpipe integrates seamlessly with the [wirebit](https://github.com/robolibs/wirebit) library for hardware protocol tunneling.
-
-### Simulation Mode (ShmLink)
-
-Use shared memory for fast, simulated network interfaces:
+### Remote Classes
 
 ```cpp
-#include <netpipe/netpipe.hpp>
-#include <wirebit/wirebit.hpp>
+// Basic Remote - single handler
+class Remote {
+    explicit Remote(Stream& stream);
+    Res<Message> call(const Message& request, dp::u32 timeout_ms);
+};
 
-// Create simulated Ethernet link
-auto shm_link = wirebit::ShmLink::create("eth0", 1024*1024).value();
-wirebit::EthEndpoint eth(std::make_shared<wirebit::ShmLink>(std::move(shm_link)), 
-                         config, 1, mac_addr);
+// RemoteRouter - multiple methods
+class RemoteRouter {
+    explicit RemoteRouter(Stream& stream);
+    dp::Res<void> register_method(dp::u32 method_id, Handler handler);
+    VoidRes serve();
+};
 
-// Tunnel frames over TCP
-netpipe::TcpStream stream;
-stream.connect({"192.168.1.100", 9001});
+// RemoteAsync - concurrent requests
+class RemoteAsync {
+    explicit RemoteAsync(Stream& stream, dp::usize max_concurrent = 100, bool enable_metrics = false);
+    Res<Message> call(dp::u32 method_id, const Message& request, dp::u32 timeout_ms);
+    bool cancel(dp::u32 request_id);
+    const RemoteMetrics& get_metrics() const;
+};
 
-auto frame = eth.recv_eth().value();
-netpipe::Message msg(frame.begin(), frame.end());
-stream.send(msg);
+// RemotePeer - bidirectional
+class RemotePeer {
+    explicit RemotePeer(Stream& stream, dp::usize max_concurrent = 100, bool enable_metrics = false);
+    dp::Res<void> register_method(dp::u32 method_id, Handler handler);
+    Res<Message> call(dp::u32 method_id, const Message& request, dp::u32 timeout_ms);
+    bool cancel(dp::u32 request_id);
+};
+
+// StreamingRemote - streaming support
+class StreamingRemote {
+    explicit StreamingRemote(Stream& stream);
+    Res<Message> client_stream(dp::u32 method_id, const dp::Vector<Message>& chunks, dp::u32 timeout_ms);
+    Res<void> server_stream(dp::u32 method_id, const Message& request, StreamCallback callback, dp::u32 timeout_ms);
+    Res<dp::u32> bidirectional_stream(dp::u32 method_id, StreamCallback callback);
+};
+
+// TypedRemote - type-safe
+template<typename T>
+class TypedRemote {
+    explicit TypedRemote(Stream& stream);
+    Res<T> call(dp::u32 method_id, const T& request, dp::u32 timeout_ms);
+};
 ```
 
-See `examples/ethernet_tunnel.cpp` for a complete example.
-
-### Real Hardware Mode (TapLink)
-
-Create **actual Linux network interfaces** visible to the entire OS:
+### Common Types
 
 ```cpp
-#include <netpipe/netpipe.hpp>
-#include <wirebit/wirebit.hpp>
-
-// Create REAL Linux TAP interface (requires sudo!)
-auto tap_link = wirebit::TapLink::create({
-    .interface_name = "tap0",
-    .create_if_missing = true,
-    .destroy_on_close = true,
-    .set_up_on_create = true
-}).value();
-
-wirebit::EthEndpoint eth(std::make_shared<wirebit::TapLink>(std::move(tap_link)),
-                         config, 1, mac_addr);
-
-// Assign IP address
-system("sudo ip addr add 10.0.0.1/24 dev tap0");
-
-// Now you can:
-// - ping through the interface
-// - tcpdump -i tap0
-// - ip link show tap0
-// - Use it like any network interface!
-
-// Tunnel all traffic over TCP
-netpipe::TcpStream stream;
-stream.listen({"0.0.0.0", 9001});
-auto client = stream.accept().value();
-
-while (true) {
-    // TAP -> TCP
-    auto frame = eth.recv_eth();
-    if (frame.is_ok()) {
-        netpipe::Message msg(frame.value().begin(), frame.value().end());
-        client->send(msg);
-    }
-    
-    // TCP -> TAP
-    auto tcp_msg = client->recv();
-    if (tcp_msg.is_ok()) {
-        wirebit::Bytes frame(tcp_msg.value().begin(), tcp_msg.value().end());
-        eth.send_eth(frame);
-    }
-}
-```
-
-See `examples/tap_tunnel.cpp` for a complete example with bidirectional bridging.
-
-**What you can do with TAP tunnel:**
-- Create VPNs and network bridges
-- Test embedded devices remotely
-- Build custom network topologies
-- Monitor traffic with tcpdump/wireshark
-- Use standard networking tools (ping, nc, ssh, etc.)
-- Full OS-level routing and firewall support
-
-## Design Philosophy
-
-### Honest Semantics
-
-Netpipe doesn't hide transport differences behind a unified interface. Different transports behave differently:
-
-- **TCP**: Reliable, ordered, connection-oriented
-- **UDP**: Unreliable, unordered, connectionless, size limits
-- **IPC**: Like TCP but local-only
-- **SHM**: Zero-copy, lock-free, local-only, fixed buffer size
-- **LoRa**: Unreliable, long-range, low bandwidth, fragmentation
-
-### Blocking API
-
-All operations block until complete. Users handle async:
-
-```cpp
-// Thread per connection
-std::thread([&]() {
-    auto client = server.accept().unwrap();
-    handle_client(client);
-}).detach();
-
-// Or use futures
-auto future = std::async(std::launch::async, [&]() {
-    return stream.recv();
-});
-```
-
-### No Exceptions
-
-All errors are returned via `dp::Result`:
-
-```cpp
-auto res = stream.send(msg);
-if (res.is_err()) {
-    // Handle error
-}
+using Message = dp::Vector<dp::u8>;
+using Handler = std::function<dp::Res<Message>(const Message&)>;
+using StreamCallback = std::function<void(const Message&)>;
 ```
 
 ## License
 
-See LICENSE file for details.
+MIT License - see [LICENSE](./LICENSE) for details.
 
-## Contributing
+## Acknowledgments
 
-Contributions welcome! Please follow the existing code style:
-
-- **snake_case** for functions and variables
-- **CamelCase** for classes and enums
-- **ALL_CAPS** for constants
-- Use `dp::` types everywhere
-- Use `echo::` for logging
-- Return `dp::Res<T>` for all fallible operations
-- Header-only, all functions `inline`
-
-## See Also
-
-- [datapod](https://github.com/robolibs/datapod) - Data types and error handling
-- [echo](https://github.com/robolibs/echo) - Compile-time logging
-- [wirebit](https://github.com/robolibs/wirebit) - Hardware protocol library
+Made possible thanks to [these amazing projects](./ACKNOWLEDGMENTS.md).
