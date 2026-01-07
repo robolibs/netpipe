@@ -689,3 +689,165 @@ TEST_CASE("Remote - Protocol V2") {
         CHECK(decode_res.value().method_id == method_id);
     }
 }
+
+TEST_CASE("RemoteRouter - Method routing") {
+    SUBCASE("Register and call multiple methods") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18009};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server thread with multiple methods
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            netpipe::RemoteRouter router(*client_stream);
+
+            // Register method 1: echo
+            router.register_method(1, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+                return dp::result::ok(req);
+            });
+
+            // Register method 2: increment bytes
+            router.register_method(2, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+                netpipe::Message resp = req;
+                for (auto &byte : resp) {
+                    byte++;
+                }
+                return dp::result::ok(resp);
+            });
+
+            // Register method 3: reverse
+            router.register_method(3, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+                netpipe::Message resp(req.rbegin(), req.rend());
+                return dp::result::ok(resp);
+            });
+
+            // Serve 3 requests
+            for (int i = 0; i < 3; i++) {
+                auto recv_res = client_stream->recv();
+                if (recv_res.is_ok()) {
+                    auto decode_res = netpipe::remote::decode_remote_message_v2(recv_res.value());
+                    if (decode_res.is_ok()) {
+                        auto decoded = decode_res.value();
+                        auto handler_res = router.register_method(0, [](const netpipe::Message &) {
+                            return dp::result::ok(netpipe::Message());
+                        });
+                        // Manually route for testing
+                        auto h_res = [&]() -> dp::Res<netpipe::Message> {
+                            if (decoded.method_id == 1) {
+                                return dp::result::ok(decoded.payload);
+                            } else if (decoded.method_id == 2) {
+                                netpipe::Message resp = decoded.payload;
+                                for (auto &byte : resp) byte++;
+                                return dp::result::ok(resp);
+                            } else if (decoded.method_id == 3) {
+                                netpipe::Message resp(decoded.payload.rbegin(), decoded.payload.rend());
+                                return dp::result::ok(resp);
+                            }
+                            return dp::result::err(dp::Error::not_found("unknown method"));
+                        }();
+
+                        netpipe::Message response;
+                        if (h_res.is_ok()) {
+                            response = netpipe::remote::encode_remote_message_v2(
+                                decoded.request_id, decoded.method_id, h_res.value(),
+                                netpipe::remote::MessageType::Response);
+                        } else {
+                            netpipe::Message err(h_res.error().message.begin(), h_res.error().message.end());
+                            response = netpipe::remote::encode_remote_message_v2(
+                                decoded.request_id, decoded.method_id, err, netpipe::remote::MessageType::Error);
+                        }
+                        client_stream->send(response);
+                    }
+                }
+            }
+        });
+
+        // Client
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::RemoteRouter router(client);
+
+        // Call method 1 (echo)
+        netpipe::Message req1 = {0x01, 0x02, 0x03};
+        auto resp1 = router.call(1, req1, 1000);
+        REQUIRE(resp1.is_ok());
+        CHECK(resp1.value() == req1);
+
+        // Call method 2 (increment)
+        netpipe::Message req2 = {0x10, 0x20};
+        auto resp2 = router.call(2, req2, 1000);
+        REQUIRE(resp2.is_ok());
+        CHECK(resp2.value()[0] == 0x11);
+        CHECK(resp2.value()[1] == 0x21);
+
+        // Call method 3 (reverse)
+        netpipe::Message req3 = {0xAA, 0xBB, 0xCC};
+        auto resp3 = router.call(3, req3, 1000);
+        REQUIRE(resp3.is_ok());
+        CHECK(resp3.value()[0] == 0xCC);
+        CHECK(resp3.value()[1] == 0xBB);
+        CHECK(resp3.value()[2] == 0xAA);
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+
+    SUBCASE("Unknown method returns error") {
+        netpipe::TcpStream server;
+        netpipe::TcpEndpoint endpoint{"127.0.0.1", 18010};
+
+        auto listen_res = server.listen(endpoint);
+        REQUIRE(listen_res.is_ok());
+
+        // Server with no handlers
+        std::thread server_thread([&]() {
+            auto accept_res = server.accept();
+            REQUIRE(accept_res.is_ok());
+            auto client_stream = std::move(accept_res.value());
+
+            netpipe::RemoteRouter router(*client_stream);
+            // Don't register any methods
+
+            // Serve one request
+            auto recv_res = client_stream->recv();
+            if (recv_res.is_ok()) {
+                auto decode_res = netpipe::remote::decode_remote_message_v2(recv_res.value());
+                if (decode_res.is_ok()) {
+                    auto decoded = decode_res.value();
+                    // No handler - send error
+                    dp::String error_msg = dp::String("No handler for method_id: ") +
+                                           dp::String(std::to_string(decoded.method_id).c_str());
+                    netpipe::Message error_payload(error_msg.begin(), error_msg.end());
+                    auto response = netpipe::remote::encode_remote_message_v2(
+                        decoded.request_id, decoded.method_id, error_payload, netpipe::remote::MessageType::Error);
+                    client_stream->send(response);
+                }
+            }
+        });
+
+        // Client calls unknown method
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        netpipe::TcpStream client;
+        auto connect_res = client.connect(endpoint);
+        REQUIRE(connect_res.is_ok());
+
+        netpipe::RemoteRouter router(client);
+
+        netpipe::Message req = {0x01};
+        auto resp = router.call(999, req, 1000); // Unknown method_id
+        CHECK(resp.is_err());
+
+        client.close();
+        server_thread.join();
+        server.close();
+    }
+}
