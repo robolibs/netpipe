@@ -74,6 +74,15 @@ namespace netpipe {
                 return dp::result::err(dp::Error::io_error("connect failed"));
             }
 
+            // Enable TCP_NODELAY to disable Nagle's algorithm for low-latency RPC
+            dp::i32 flag = 1;
+            if (::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                echo::warn("setsockopt TCP_NODELAY failed: ", strerror(errno));
+                // Non-fatal - continue anyway
+            } else {
+                echo::trace("TCP_NODELAY enabled on fd=", fd_);
+            }
+
             connected_ = true;
             remote_endpoint_ = endpoint;
             echo::debug("connected to ", endpoint.to_string());
@@ -155,6 +164,15 @@ namespace netpipe {
             if (client_fd < 0) {
                 echo::error("accept failed: ", strerror(errno));
                 return dp::result::err(dp::Error::io_error("io error"));
+            }
+
+            // Enable TCP_NODELAY on accepted client socket for low-latency RPC
+            dp::i32 flag = 1;
+            if (::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                echo::warn("setsockopt TCP_NODELAY failed on client_fd: ", strerror(errno));
+                // Non-fatal - continue anyway
+            } else {
+                echo::trace("TCP_NODELAY enabled on client_fd=", client_fd);
             }
 
             // Get client address
