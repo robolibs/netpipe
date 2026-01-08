@@ -9,7 +9,7 @@ local PROJECT_VERSION = "0.0.5"
 --   Local:  {"name", "../path/to/local"}  (optional: uses git if not found)
 --   System: "pkgconfig::libname" or {system = "boost"}
 local LIB_DEPS = {
-    {"echo", "https://github.com/bresilla/echo.git", "0.0.19"},
+    {"echo", "https://github.com/bresilla/echo.git", "0.0.23"},
     {"datapod", "https://github.com/robolibs/datapod.git", "0.0.31"},
 }
 local EXAMPLE_DEPS = {
