@@ -1,104 +1,143 @@
 #pragma once
 
+#include <atomic>
+#include <chrono>
 #include <datapod/pods/lockfree/ring_buffer.hpp>
 #include <netpipe/stream.hpp>
+#include <thread>
 
 namespace netpipe {
 
-    // Shared memory stream implementation using datapod's RingBuffer
-    // Ultra-low latency, same machine only
-    // Uses datapod's lock-free SPSC ring buffer with u8 elements
+    /// Bidirectional shared memory stream using TWO SPSC ring buffers
+    /// Ultra-low latency, same machine only
+    /// Server writes to s2c, reads from c2s
+    /// Client writes to c2s, reads from s2c
     class ShmStream : public Stream {
       private:
-        dp::RingBuffer<dp::SPSC, dp::u8> ring_buffer_;
+        dp::RingBuffer<dp::SPSC, dp::u8> send_buffer_;
+        dp::RingBuffer<dp::SPSC, dp::u8> recv_buffer_;
         bool connected_;
-        bool is_creator_;
-        ShmEndpoint local_endpoint_;
+        bool is_server_;
+        dp::String channel_name_;
+        dp::usize buffer_size_;
+        dp::u32 recv_timeout_ms_;
+        static constexpr dp::u32 POLL_INTERVAL_US = 100;
 
       public:
-        ShmStream() : connected_(false), is_creator_(false) { echo::trace("ShmStream constructed"); }
-
+        ShmStream() : connected_(false), is_server_(false), recv_timeout_ms_(0) {
+            echo::trace("ShmStream constructed");
+        }
         ~ShmStream() override {
             if (connected_) {
                 close();
             }
         }
 
-        // Client side: attach to existing shared memory ring buffer
-        dp::Res<void> connect(const TcpEndpoint &endpoint) override {
-            ShmEndpoint shm_endpoint{endpoint.host, static_cast<dp::usize>(endpoint.port)};
-            return connect_shm(shm_endpoint);
-        }
-
-        dp::Res<void> connect_shm(const ShmEndpoint &endpoint) {
-            echo::trace("connecting to shm ring buffer ", endpoint.to_string());
-
-            // Attach to existing shared memory ring buffer
-            // datapod RingBuffer expects name to start with '/'
-            char shm_name_buf[256];
-            snprintf(shm_name_buf, sizeof(shm_name_buf), "/%s", endpoint.name.c_str());
-            dp::String shm_name(shm_name_buf);
-
-            auto result = dp::RingBuffer<dp::SPSC, dp::u8>::attach_shm(shm_name);
-            if (result.is_err()) {
-                echo::error("failed to attach to ring buffer");
-                return dp::result::err(dp::Error::io_error("attach failed"));
-            }
-
-            ring_buffer_ = std::move(result.value());
-            connected_ = true;
-            is_creator_ = false;
-            local_endpoint_ = endpoint;
-
-            echo::debug("ShmStream connected to ", endpoint.to_string());
-            echo::info("ShmStream connected to ", endpoint.name.c_str());
-
-            return dp::result::ok();
-        }
-
-        // Server side: create shared memory ring buffer
+        /// Server side: create BOTH ring buffers
         dp::Res<void> listen(const TcpEndpoint &endpoint) override {
             ShmEndpoint shm_endpoint{endpoint.host, static_cast<dp::usize>(endpoint.port)};
             return listen_shm(shm_endpoint);
         }
 
         dp::Res<void> listen_shm(const ShmEndpoint &endpoint) {
-            echo::trace("creating shm ring buffer ", endpoint.to_string());
+            echo::trace("creating shm bidirectional buffers ", endpoint.to_string());
 
-            // datapod RingBuffer expects name to start with '/'
-            char shm_name_buf[256];
-            snprintf(shm_name_buf, sizeof(shm_name_buf), "/%s", endpoint.name.c_str());
-            dp::String shm_name(shm_name_buf);
-
-            // Try to unlink any existing shared memory first (cleanup from previous runs)
-            ::shm_unlink(shm_name.c_str());
-
-            // Create shared memory ring buffer
-            // Size is the capacity in bytes
-            auto result = dp::RingBuffer<dp::SPSC, dp::u8>::create_shm(shm_name, endpoint.size);
-            if (result.is_err()) {
-                echo::error("failed to create ring buffer");
-                return dp::result::err(dp::Error::io_error("create failed"));
+            // Validate name length (need room for "_s2c" and "_c2s" suffixes)
+            if (endpoint.name.size() > 250) {
+                echo::error("shm name too long (max 250 chars): ", endpoint.name.size());
+                return dp::result::err(dp::Error::invalid_argument("shm name exceeds 250 character limit"));
             }
 
-            ring_buffer_ = std::move(result.value());
-            connected_ = true;
-            is_creator_ = true;
-            local_endpoint_ = endpoint;
+            is_server_ = true;
+            channel_name_ = endpoint.name;
+            buffer_size_ = endpoint.size;
 
-            echo::debug("ShmStream created ", endpoint.to_string());
-            echo::info("ShmStream created ", endpoint.name.c_str(), " size=", endpoint.size);
+            // Server writes to s2c, reads from c2s
+            char s2c_name[256];
+            char c2s_name[256];
+            snprintf(s2c_name, sizeof(s2c_name), "/%s_s2c", endpoint.name.c_str());
+            snprintf(c2s_name, sizeof(c2s_name), "/%s_c2s", endpoint.name.c_str());
+
+            // Clean up any existing shared memory
+            ::shm_unlink(s2c_name);
+            ::shm_unlink(c2s_name);
+
+            // Create send buffer (server-to-client)
+            auto send_res = dp::RingBuffer<dp::SPSC, dp::u8>::create_shm(dp::String(s2c_name), endpoint.size);
+            if (send_res.is_err()) {
+                echo::error("failed to create s2c ring buffer");
+                return dp::result::err(dp::Error::io_error("failed to create s2c buffer"));
+            }
+            send_buffer_ = std::move(send_res.value());
+
+            // Create recv buffer (client-to-server)
+            auto recv_res = dp::RingBuffer<dp::SPSC, dp::u8>::create_shm(dp::String(c2s_name), endpoint.size);
+            if (recv_res.is_err()) {
+                echo::error("failed to create c2s ring buffer");
+                return dp::result::err(dp::Error::io_error("failed to create c2s buffer"));
+            }
+            recv_buffer_ = std::move(recv_res.value());
+
+            connected_ = true;
+            echo::info("ShmStream server created on channel: ", endpoint.name.c_str());
 
             return dp::result::ok();
         }
 
-        // Accept not applicable for SHM (1:1 connection)
+        /// Client side: attach to BOTH ring buffers
+        dp::Res<void> connect(const TcpEndpoint &endpoint) override {
+            ShmEndpoint shm_endpoint{endpoint.host, static_cast<dp::usize>(endpoint.port)};
+            return connect_shm(shm_endpoint);
+        }
+
+        dp::Res<void> connect_shm(const ShmEndpoint &endpoint) {
+            echo::trace("connecting to shm bidirectional buffers ", endpoint.to_string());
+
+            // Validate name length
+            if (endpoint.name.size() > 250) {
+                echo::error("shm name too long (max 250 chars): ", endpoint.name.size());
+                return dp::result::err(dp::Error::invalid_argument("shm name exceeds 250 character limit"));
+            }
+
+            is_server_ = false;
+            channel_name_ = endpoint.name;
+            buffer_size_ = endpoint.size;
+
+            // Client writes to c2s, reads from s2c
+            char s2c_name[256];
+            char c2s_name[256];
+            snprintf(s2c_name, sizeof(s2c_name), "/%s_s2c", endpoint.name.c_str());
+            snprintf(c2s_name, sizeof(c2s_name), "/%s_c2s", endpoint.name.c_str());
+
+            // Attach to send buffer (client-to-server)
+            auto send_res = dp::RingBuffer<dp::SPSC, dp::u8>::attach_shm(dp::String(c2s_name));
+            if (send_res.is_err()) {
+                echo::error("failed to attach to c2s ring buffer");
+                return dp::result::err(dp::Error::io_error("failed to attach to c2s buffer"));
+            }
+            send_buffer_ = std::move(send_res.value());
+
+            // Attach to recv buffer (server-to-client)
+            auto recv_res = dp::RingBuffer<dp::SPSC, dp::u8>::attach_shm(dp::String(s2c_name));
+            if (recv_res.is_err()) {
+                echo::error("failed to attach to s2c ring buffer");
+                return dp::result::err(dp::Error::io_error("failed to attach to s2c buffer"));
+            }
+            recv_buffer_ = std::move(recv_res.value());
+
+            connected_ = true;
+            echo::info("ShmStream client connected to channel: ", endpoint.name.c_str());
+
+            return dp::result::ok();
+        }
+
+        /// Accept not applicable for SHM (connection established when client attaches)
         dp::Res<std::unique_ptr<Stream>> accept() override {
             echo::error("accept not supported for ShmStream");
             return dp::result::err(dp::Error::invalid_argument("accept not supported"));
         }
 
-        // Send message to ring buffer with length-prefix framing
+        /// Send message with length-prefix framing
         dp::Res<void> send(const Message &msg) override {
             if (!connected_) {
                 echo::error("send called but not connected");
@@ -112,7 +151,7 @@ namespace netpipe {
 
             // Push length prefix bytes
             for (dp::usize i = 0; i < 4; i++) {
-                auto res = ring_buffer_.push(length_bytes[i]);
+                auto res = send_buffer_.push(length_bytes[i]);
                 if (res.is_err()) {
                     echo::warn("ring buffer full, cannot send length");
                     return dp::result::err(dp::Error::io_error("ring buffer full"));
@@ -121,11 +160,9 @@ namespace netpipe {
 
             // Push payload bytes
             for (dp::usize i = 0; i < msg.size(); i++) {
-                auto res = ring_buffer_.push(msg[i]);
+                auto res = send_buffer_.push(msg[i]);
                 if (res.is_err()) {
                     echo::warn("ring buffer full, cannot send payload");
-                    // Note: This is problematic - we've already sent the length!
-                    // In production, you'd want to check space before starting
                     return dp::result::err(dp::Error::io_error("ring buffer full"));
                 }
             }
@@ -134,7 +171,8 @@ namespace netpipe {
             return dp::result::ok();
         }
 
-        // Receive message from ring buffer with length-prefix framing
+        /// Receive message with length-prefix framing
+        /// Supports blocking with timeout via polling
         dp::Res<Message> recv() override {
             if (!connected_) {
                 echo::error("recv called but not connected");
@@ -143,57 +181,88 @@ namespace netpipe {
 
             echo::trace("shm recv waiting");
 
-            // Read length prefix (4 bytes)
+            auto start_time = std::chrono::steady_clock::now();
+
+            // Read length prefix (4 bytes) with polling
             dp::Array<dp::u8, 4> length_bytes;
             for (dp::usize i = 0; i < 4; i++) {
-                auto res = ring_buffer_.pop();
-                if (res.is_err()) {
-                    // No data available
-                    return dp::result::err(dp::Error::io_error("no data available"));
+                while (true) {
+                    auto res = recv_buffer_.pop();
+                    if (res.is_ok()) {
+                        length_bytes[i] = res.value();
+                        break;
+                    }
+
+                    // Check timeout
+                    if (recv_timeout_ms_ > 0) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - start_time)
+                                           .count();
+                        if (elapsed >= recv_timeout_ms_) {
+                            echo::warn("recv timeout waiting for length byte ", i);
+                            return dp::result::err(dp::Error::timeout("recv timeout"));
+                        }
+                    }
+
+                    // Poll with small sleep to avoid busy-waiting
+                    std::this_thread::sleep_for(std::chrono::microseconds(POLL_INTERVAL_US));
                 }
-                length_bytes[i] = res.value();
             }
 
             dp::u32 length = decode_u32_be(length_bytes.data());
             echo::trace("recv expecting ", length, " bytes");
 
-            // Read payload
+            // Read payload with polling
             Message msg(length);
             for (dp::usize i = 0; i < length; i++) {
-                auto res = ring_buffer_.pop();
-                if (res.is_err()) {
-                    echo::error("incomplete message in ring buffer");
-                    return dp::result::err(dp::Error::io_error("incomplete message"));
+                while (true) {
+                    auto res = recv_buffer_.pop();
+                    if (res.is_ok()) {
+                        msg[i] = res.value();
+                        break;
+                    }
+
+                    // Check timeout
+                    if (recv_timeout_ms_ > 0) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - start_time)
+                                           .count();
+                        if (elapsed >= recv_timeout_ms_) {
+                            echo::warn("recv timeout waiting for payload byte ", i);
+                            return dp::result::err(dp::Error::timeout("recv timeout"));
+                        }
+                    }
+
+                    std::this_thread::sleep_for(std::chrono::microseconds(POLL_INTERVAL_US));
                 }
-                msg[i] = res.value();
             }
 
             echo::debug("received ", length, " bytes");
             return dp::result::ok(std::move(msg));
         }
 
-        // Set receive timeout in milliseconds
-        // Note: ShmStream uses lock-free ring buffer, timeout not directly supported
-        // This is a no-op for compatibility with Stream interface
+        /// Set receive timeout in milliseconds
         dp::Res<void> set_recv_timeout(dp::u32 timeout_ms) override {
-            echo::warn("set_recv_timeout not supported for ShmStream (lock-free ring buffer)");
-            // Return ok to maintain compatibility, but timeout won't be enforced
+            recv_timeout_ms_ = timeout_ms;
+            echo::trace("set recv timeout to ", timeout_ms, "ms");
             return dp::result::ok();
         }
 
-        // Close and cleanup
         void close() override {
             if (connected_) {
-                echo::trace("closing shm ring buffer");
-                // RingBuffer destructor handles cleanup
+                echo::trace("closing shm stream");
                 connected_ = false;
-                is_creator_ = false;
                 echo::debug("ShmStream closed");
             }
         }
 
-        // Check if connected
         bool is_connected() const override { return connected_; }
+
+        /// Get the channel name
+        const dp::String &channel_name() const { return channel_name_; }
+
+        /// Check if this is the server side
+        bool is_server() const { return is_server_; }
     };
 
 } // namespace netpipe

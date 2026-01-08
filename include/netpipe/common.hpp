@@ -49,14 +49,18 @@ namespace netpipe {
                     continue; // Interrupted by signal, retry
                 }
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    echo::debug("read timeout");
+                    echo::trace("read timeout");
                     return dp::result::err(dp::Error::timeout("read timeout"));
                 }
-                echo::error("read failed: ", strerror(errno));
+                if (errno == EBADF || errno == ECONNRESET || errno == EPIPE) {
+                    echo::trace("read failed: connection closed or invalid fd");
+                    return dp::result::err(dp::Error::not_found("connection closed"));
+                }
+                echo::trace("read failed: ", strerror(errno));
                 return dp::result::err(dp::Error::io_error("io error"));
             }
             if (n == 0) {
-                echo::debug("connection closed by peer");
+                echo::trace("connection closed by peer");
                 return dp::result::err(dp::Error::not_found("connection closed"));
             }
             total_read += static_cast<dp::usize>(n);
@@ -76,7 +80,11 @@ namespace netpipe {
                     echo::trace("write interrupted by signal, retrying");
                     continue; // Interrupted by signal, retry
                 }
-                echo::error("write failed: ", strerror(errno));
+                if (errno == EBADF || errno == ECONNRESET || errno == EPIPE) {
+                    echo::trace("write failed: connection closed or invalid fd");
+                    return dp::result::err(dp::Error::not_found("connection closed"));
+                }
+                echo::trace("write failed: ", strerror(errno));
                 return dp::result::err(dp::Error::io_error("io error"));
             }
             total_written += static_cast<dp::usize>(n);
