@@ -179,8 +179,8 @@ namespace netpipe {
 
         // Send a message with length-prefix framing (same as TCP)
         dp::Res<void> send(const Message &msg) override {
-            if (!connected_) {
-                echo::error("send called but not connected");
+            if (!connected_ || fd_ < 0) {
+                echo::trace("send called but not connected");
                 return dp::result::err(dp::Error::not_found("not connected"));
             }
 
@@ -193,7 +193,7 @@ namespace netpipe {
             auto res = write_exact(fd_, length_bytes.data(), 4);
             if (res.is_err()) {
                 connected_ = false;
-                echo::error("send length failed");
+                echo::trace("send length failed: ", res.error().message.c_str());
                 return res;
             }
 
@@ -202,7 +202,7 @@ namespace netpipe {
                 res = write_exact(fd_, msg.data(), msg.size());
                 if (res.is_err()) {
                     connected_ = false;
-                    echo::error("send payload failed");
+                    echo::trace("send payload failed: ", res.error().message.c_str());
                     return res;
                 }
             }
@@ -213,8 +213,8 @@ namespace netpipe {
 
         // Receive a message with length-prefix framing (same as TCP)
         dp::Res<Message> recv() override {
-            if (!connected_) {
-                echo::error("recv called but not connected");
+            if (!connected_ || fd_ < 0) {
+                echo::trace("recv called but not connected");
                 return dp::result::err(dp::Error::not_found("not connected"));
             }
 
@@ -224,8 +224,11 @@ namespace netpipe {
             dp::Array<dp::u8, 4> length_bytes;
             auto res = read_exact(fd_, length_bytes.data(), 4);
             if (res.is_err()) {
-                connected_ = false;
-                echo::error("recv length failed");
+                // Only mark as disconnected for non-timeout errors
+                if (res.error().code != dp::Error::TIMEOUT) {
+                    connected_ = false;
+                    echo::trace("recv length failed: ", res.error().message.c_str());
+                }
                 return dp::result::err(res.error());
             }
 
@@ -237,8 +240,11 @@ namespace netpipe {
             if (length > 0) {
                 res = read_exact(fd_, msg.data(), length);
                 if (res.is_err()) {
-                    connected_ = false;
-                    echo::error("recv payload failed");
+                    // Only mark as disconnected for non-timeout errors
+                    if (res.error().code != dp::Error::TIMEOUT) {
+                        connected_ = false;
+                        echo::trace("recv payload failed: ", res.error().message.c_str());
+                    }
                     return dp::result::err(res.error());
                 }
             }

@@ -26,9 +26,10 @@ TEST_CASE("ShmStream - Long name handling") {
         }
     }
 
-    SUBCASE("Name with 254 characters (at POSIX limit with '/')") {
-        std::string name_254(254, 'c');
-        netpipe::ShmEndpoint endpoint{name_254.c_str(), 8192};
+    SUBCASE("Name with 250 characters (at limit with suffix)") {
+        // With "/" prefix and "_c2s" suffix, max base name is 250 chars (1+250+4=255)
+        std::string name_250_limit(250, 'c');
+        netpipe::ShmEndpoint endpoint{name_250_limit.c_str(), 8192};
         netpipe::ShmStream stream;
 
         auto result = stream.listen_shm(endpoint);
@@ -36,6 +37,15 @@ TEST_CASE("ShmStream - Long name handling") {
         if (result.is_ok()) {
             stream.close();
         }
+    }
+
+    SUBCASE("Name with 251 characters (exceeds limit - should fail)") {
+        std::string name_251(251, 'c');
+        netpipe::ShmEndpoint endpoint{name_251.c_str(), 8192};
+        netpipe::ShmStream stream;
+
+        auto result = stream.listen_shm(endpoint);
+        CHECK(result.is_err());
     }
 
     SUBCASE("Name with 255 characters (exceeds limit - should fail gracefully)") {

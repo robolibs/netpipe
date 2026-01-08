@@ -14,7 +14,9 @@
 
 TEST_CASE("ShmStream + Remote<Bidirect> - 1MB payload") {
     netpipe::ShmStream server_stream;
-    netpipe::ShmEndpoint endpoint{"shm_bidirect_1mb", 1536 * 1024 * 1024}; // 1.5GB buffer
+    // Buffer needs to hold: 1MB request + 1MB response in each direction = ~4MB
+    // Add overhead for concurrent sends = 8MB should be plenty
+    netpipe::ShmEndpoint endpoint{"shm_bidirect_1mb", 8 * 1024 * 1024};
 
     auto listen_res = server_stream.listen_shm(endpoint);
     REQUIRE(listen_res.is_ok());
@@ -107,7 +109,9 @@ TEST_CASE("ShmStream + Remote<Bidirect> - 1MB payload") {
 
 TEST_CASE("ShmStream + Remote<Bidirect> - 10MB payload") {
     netpipe::ShmStream server_stream;
-    netpipe::ShmEndpoint endpoint{"shm_bidirect_10mb", 1536 * 1024 * 1024}; // 1.5GB buffer
+    // Buffer needs to hold: 10MB request + 10MB response in each direction = ~40MB
+    // Add overhead for concurrent sends = 64MB should be plenty
+    netpipe::ShmEndpoint endpoint{"shm_bidirect_10mb", 64 * 1024 * 1024};
 
     auto listen_res = server_stream.listen_shm(endpoint);
     REQUIRE(listen_res.is_ok());
@@ -200,7 +204,9 @@ TEST_CASE("ShmStream + Remote<Bidirect> - 10MB payload") {
 
 TEST_CASE("ShmStream + Remote<Bidirect> - 100MB payload") {
     netpipe::ShmStream server_stream;
-    netpipe::ShmEndpoint endpoint{"shm_bidirect_100mb", 1536 * 1024 * 1024}; // 1.5GB buffer
+    // Buffer needs to hold: 100MB request + 100MB response in each direction = ~400MB
+    // Add overhead for concurrent sends = 512MB should be plenty
+    netpipe::ShmEndpoint endpoint{"shm_bidirect_100mb", 512 * 1024 * 1024};
 
     auto listen_res = server_stream.listen_shm(endpoint);
     REQUIRE(listen_res.is_ok());

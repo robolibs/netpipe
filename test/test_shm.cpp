@@ -185,6 +185,9 @@ TEST_CASE("ShmStream - Error conditions") {
         auto connect_res = connector.connect_shm(endpoint);
         REQUIRE(connect_res.is_ok());
 
+        // Set a short timeout so recv fails quickly when no data available
+        connector.set_recv_timeout(100);
+
         // Try to receive when nothing was sent
         auto recv_res = connector.recv();
         CHECK(recv_res.is_err());

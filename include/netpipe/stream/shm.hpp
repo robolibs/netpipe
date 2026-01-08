@@ -42,7 +42,9 @@ namespace netpipe {
         dp::Res<void> listen_shm(const ShmEndpoint &endpoint) {
             echo::trace("creating shm bidirectional buffers ", endpoint.to_string());
 
-            // Validate name length (need room for "_s2c" and "_c2s" suffixes)
+            // Validate name length (need room for "/_s2c" suffix)
+            // With "/" prefix + "_s2c" suffix = 5 extra chars
+            // POSIX NAME_MAX is 255, so max base name is 255 - 5 = 250
             if (endpoint.name.size() > 250) {
                 echo::error("shm name too long (max 250 chars): ", endpoint.name.size());
                 return dp::result::err(dp::Error::invalid_argument("shm name exceeds 250 character limit"));
@@ -140,7 +142,7 @@ namespace netpipe {
         /// Send message with length-prefix framing
         dp::Res<void> send(const Message &msg) override {
             if (!connected_) {
-                echo::error("send called but not connected");
+                echo::trace("send called but not connected");
                 return dp::result::err(dp::Error::not_found("not connected"));
             }
 
@@ -175,7 +177,7 @@ namespace netpipe {
         /// Supports blocking with timeout via polling
         dp::Res<Message> recv() override {
             if (!connected_) {
-                echo::error("recv called but not connected");
+                echo::trace("recv called but not connected");
                 return dp::result::err(dp::Error::not_found("not connected"));
             }
 
@@ -193,13 +195,13 @@ namespace netpipe {
                         break;
                     }
 
-                    // Check timeout
+                    // Check timeout (only if timeout is set)
                     if (recv_timeout_ms_ > 0) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - start_time)
                                            .count();
                         if (elapsed >= recv_timeout_ms_) {
-                            echo::warn("recv timeout waiting for length byte ", i);
+                            echo::trace("recv timeout waiting for length byte ", i);
                             return dp::result::err(dp::Error::timeout("recv timeout"));
                         }
                     }
@@ -222,13 +224,13 @@ namespace netpipe {
                         break;
                     }
 
-                    // Check timeout
+                    // Check timeout (only if timeout is set)
                     if (recv_timeout_ms_ > 0) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - start_time)
                                            .count();
                         if (elapsed >= recv_timeout_ms_) {
-                            echo::warn("recv timeout waiting for payload byte ", i);
+                            echo::trace("recv timeout waiting for payload byte ", i);
                             return dp::result::err(dp::Error::timeout("recv timeout"));
                         }
                     }
