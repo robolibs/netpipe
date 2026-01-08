@@ -175,6 +175,12 @@ namespace netpipe {
 
         /// Receive message with length-prefix framing
         /// Supports blocking with timeout via polling
+        /// TIMEOUT HANDLING:
+        /// - Timeouts are expected behavior (not errors) when using set_recv_timeout()
+        /// - Connection stays alive after timeout - caller can retry
+        /// - Timeout does NOT mark connection as disconnected
+        /// - This allows RPC to implement request timeouts without breaking the connection
+        /// - Behavior matches TcpStream and IpcStream for consistency
         dp::Res<Message> recv() override {
             if (!connected_) {
                 echo::trace("recv called but not connected");
@@ -184,14 +190,16 @@ namespace netpipe {
             echo::trace("shm recv waiting");
 
             auto start_time = std::chrono::steady_clock::now();
+            dp::u32 poll_interval_us = POLL_INTERVAL_US; // Start with base interval
 
-            // Read length prefix (4 bytes) with polling
+            // Read length prefix (4 bytes) with polling and exponential backoff
             dp::Array<dp::u8, 4> length_bytes;
             for (dp::usize i = 0; i < 4; i++) {
                 while (true) {
                     auto res = recv_buffer_.pop();
                     if (res.is_ok()) {
                         length_bytes[i] = res.value();
+                        poll_interval_us = POLL_INTERVAL_US; // Reset backoff on success
                         break;
                     }
 
@@ -202,25 +210,31 @@ namespace netpipe {
                                            .count();
                         if (elapsed >= recv_timeout_ms_) {
                             echo::trace("recv timeout waiting for length byte ", i);
+                            // Timeout keeps connection alive - caller can retry
                             return dp::result::err(dp::Error::timeout("recv timeout"));
                         }
                     }
 
-                    // Poll with small sleep to avoid busy-waiting
-                    std::this_thread::sleep_for(std::chrono::microseconds(POLL_INTERVAL_US));
+                    // Poll with exponential backoff to reduce CPU usage
+                    // Start at 100us, double up to max 10ms
+                    std::this_thread::sleep_for(std::chrono::microseconds(poll_interval_us));
+                    if (poll_interval_us < 10000) {
+                        poll_interval_us = std::min(poll_interval_us * 2, 10000u);
+                    }
                 }
             }
 
             dp::u32 length = decode_u32_be(length_bytes.data());
             echo::trace("recv expecting ", length, " bytes");
 
-            // Read payload with polling
+            // Read payload with polling and exponential backoff
             Message msg(length);
             for (dp::usize i = 0; i < length; i++) {
                 while (true) {
                     auto res = recv_buffer_.pop();
                     if (res.is_ok()) {
                         msg[i] = res.value();
+                        poll_interval_us = POLL_INTERVAL_US; // Reset backoff on success
                         break;
                     }
 
@@ -231,11 +245,16 @@ namespace netpipe {
                                            .count();
                         if (elapsed >= recv_timeout_ms_) {
                             echo::trace("recv timeout waiting for payload byte ", i);
+                            // Timeout keeps connection alive - caller can retry
                             return dp::result::err(dp::Error::timeout("recv timeout"));
                         }
                     }
 
-                    std::this_thread::sleep_for(std::chrono::microseconds(POLL_INTERVAL_US));
+                    // Poll with exponential backoff to reduce CPU usage
+                    std::this_thread::sleep_for(std::chrono::microseconds(poll_interval_us));
+                    if (poll_interval_us < 10000) {
+                        poll_interval_us = std::min(poll_interval_us * 2, 10000u);
+                    }
                 }
             }
 
