@@ -15,6 +15,7 @@
 // Stream implementations
 #include <netpipe/stream/ipc.hpp>
 #include <netpipe/stream/shm.hpp>
+#include <netpipe/stream/shm_rpc.hpp>
 #include <netpipe/stream/tcp.hpp>
 
 // Datagram implementations
@@ -35,7 +36,7 @@
 //   - netpipe::Message (dp::Vector<dp::u8>)
 //   - netpipe::TcpEndpoint, UdpEndpoint, IpcEndpoint, ShmEndpoint, LoraEndpoint
 //   - netpipe::Stream (base class)
-//   - netpipe::TcpStream, IpcStream, ShmStream
+//   - netpipe::TcpStream, IpcStream, ShmStream, ShmRpcStream
 //   - netpipe::Datagram (base class)
 //   - netpipe::UdpDatagram, LoraDatagram
 //   - netpipe::Remote (new name for RPC)
