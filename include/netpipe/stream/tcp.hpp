@@ -226,6 +226,11 @@ namespace netpipe {
         }
 
         // Receive a message with length-prefix framing
+        // TIMEOUT HANDLING:
+        // - Timeouts are expected behavior (not errors) when using set_recv_timeout()
+        // - Connection stays alive after timeout - caller can retry
+        // - Only fatal errors (connection closed, I/O errors) mark connection as disconnected
+        // - This allows RPC to implement request timeouts without breaking the connection
         dp::Res<Message> recv() override {
             if (!connected_ || fd_ < 0) {
                 echo::trace("recv called but not connected");
@@ -239,6 +244,7 @@ namespace netpipe {
             auto res = read_exact(fd_, length_bytes.data(), 4);
             if (res.is_err()) {
                 // Only mark as disconnected for non-timeout errors
+                // Timeout is expected behavior - connection stays alive
                 if (res.error().code != dp::Error::TIMEOUT) {
                     connected_ = false;
                     echo::trace("recv length failed: ", res.error().message.c_str());
@@ -255,6 +261,7 @@ namespace netpipe {
                 res = read_exact(fd_, msg.data(), length);
                 if (res.is_err()) {
                     // Only mark as disconnected for non-timeout errors
+                    // Timeout during payload read keeps connection alive
                     if (res.error().code != dp::Error::TIMEOUT) {
                         connected_ = false;
                         echo::trace("recv payload failed: ", res.error().message.c_str());
