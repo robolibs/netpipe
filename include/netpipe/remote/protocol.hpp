@@ -6,6 +6,10 @@
 namespace netpipe {
     namespace remote {
 
+        /// Maximum message size (1GB by default)
+        /// Messages exceeding this size will be rejected to prevent memory exhaustion
+        constexpr dp::u32 MAX_MESSAGE_SIZE = 1024 * 1024 * 1024; // 1GB
+
         /// Message types
         enum class MessageType : dp::u8 {
             Request = 0,      // Client request
@@ -75,6 +79,12 @@ namespace netpipe {
 
             // Decode payload length
             dp::u32 payload_length = decode_u32_be(msg.data() + 5);
+
+            // Validate payload length against maximum
+            if (payload_length > MAX_MESSAGE_SIZE) {
+                echo::error("remote message too large: ", payload_length, " bytes (max: ", MAX_MESSAGE_SIZE, ")");
+                return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
+            }
 
             // Verify message size
             if (msg.size() != 9 + payload_length) {
@@ -176,6 +186,12 @@ namespace netpipe {
 
             // Decode payload length
             dp::u32 payload_length = decode_u32_be(msg.data() + 12);
+
+            // Validate payload length against maximum
+            if (payload_length > MAX_MESSAGE_SIZE) {
+                echo::error("remote v2 message too large: ", payload_length, " bytes (max: ", MAX_MESSAGE_SIZE, ")");
+                return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
+            }
 
             // Verify message size
             if (msg.size() != 16 + payload_length) {

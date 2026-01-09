@@ -3,6 +3,7 @@
 #include <atomic>
 #include <chrono>
 #include <datapod/pods/lockfree/ring_buffer.hpp>
+#include <netpipe/remote/protocol.hpp>
 #include <netpipe/stream.hpp>
 #include <thread>
 
@@ -326,21 +327,20 @@ namespace netpipe {
             echo::trace("recv expecting ", length, " bytes");
 
             // Validate message size before allocating
-            // Max size is buffer_size / 2 to allow bidirectional communication
-            dp::usize max_message_size = buffer_size_ / 2;
-            if (length > max_message_size) {
-                echo::error("received invalid message length: ", length, " bytes (max ", max_message_size, " bytes)");
-                // Stream is corrupted - close connection
+            // Check against global maximum first
+            if (length > remote::MAX_MESSAGE_SIZE) {
+                echo::error("received message too large: ", length, " bytes (max: ", remote::MAX_MESSAGE_SIZE, ")");
                 connected_ = false;
-                return dp::result::err(dp::Error::invalid_argument("received message exceeds maximum size"));
+                return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
             }
 
-            // Additional sanity check: length should be reasonable
-            // Reject obviously corrupted lengths (e.g., > 2GB)
-            if (length > 2147483648u) { // 2GB
-                echo::error("received unreasonably large message length: ", length, " bytes");
+            // Check against buffer capacity (buffer_size / 2 to allow bidirectional)
+            dp::usize max_buffer_size = buffer_size_ / 2;
+            if (length > max_buffer_size) {
+                echo::error("received message exceeds buffer capacity: ", length,
+                            " bytes (buffer max: ", max_buffer_size, " bytes)");
                 connected_ = false;
-                return dp::result::err(dp::Error::invalid_argument("received message length is unreasonable"));
+                return dp::result::err(dp::Error::invalid_argument("message exceeds buffer capacity"));
             }
 
             // Read payload with polling and exponential backoff

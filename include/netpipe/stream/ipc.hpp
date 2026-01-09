@@ -1,5 +1,6 @@
 #pragma once
 
+#include <netpipe/remote/protocol.hpp>
 #include <netpipe/stream.hpp>
 
 #include <sys/socket.h>
@@ -241,6 +242,13 @@ namespace netpipe {
 
             dp::u32 length = decode_u32_be(length_bytes.data());
             echo::trace("recv expecting ", length, " bytes");
+
+            // Validate message size before allocating
+            if (length > remote::MAX_MESSAGE_SIZE) {
+                echo::error("received message too large: ", length, " bytes (max: ", remote::MAX_MESSAGE_SIZE, ")");
+                connected_ = false;
+                return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
+            }
 
             // Read payload
             Message msg(length);
