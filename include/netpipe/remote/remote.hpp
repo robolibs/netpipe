@@ -750,6 +750,7 @@ namespace netpipe {
                 {
                     std::lock_guard<std::mutex> lock(send_mutex_);
                     auto send_res = stream_.send(remote_request);
+
                     if (send_res.is_err()) {
                         // Remove from pending
                         {

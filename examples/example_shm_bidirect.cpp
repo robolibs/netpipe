@@ -1,37 +1,47 @@
-/// Example: SHM + Remote<Bidirect> - NOW WORKS WITH TWO BUFFERS!
-/// Demonstrates bidirectional RPC over shared memory
+/// Example: SHM + Remote<Bidirect> - TCP-like connection semantics
+/// Demonstrates bidirectional RPC over shared memory with accept/connect pattern
 ///
-/// KEY INSIGHT: ShmStream now uses TWO separate SPSC ring buffers:
-///   - Server writes to "s2c" (server-to-client), reads from "c2s" (client-to-server)
-///   - Client writes to "c2s" (client-to-server), reads from "s2c" (server-to-client)
-///
-/// This eliminates contention and enables true bidirectional communication!
-/// Both peers can simultaneously call methods on each other.
+/// Architecture:
+/// - Server: listen_shm() -> accept() returns new ShmStream per client
+/// - Client: connect_shm() establishes dedicated buffer pair
+/// - Each connection gets independent s2c/c2s buffers
 ///
 /// Test cases: 1MB, 10MB, 100MB, 1GB
 
 #include <chrono>
+#include <memory>
 #include <netpipe/netpipe.hpp>
 #include <thread>
 
 void test_payload(dp::usize size_mb) {
     echo::info("=== Testing ", size_mb, "MB payload ===");
 
-    // Server thread
-    std::thread server_thread([size_mb]() {
-        netpipe::ShmStream server;
-        netpipe::ShmEndpoint endpoint{"netpipe_shm_bidirect", 1536 * 1024 * 1024}; // 1.5GB per direction
+    netpipe::ShmStream listener;
+    netpipe::ShmEndpoint endpoint{"netpipe_shm_bidirect", 256 * 1024 * 1024}; // 256MB buffer per connection
 
-        auto listen_res = server.listen_shm(endpoint);
-        if (listen_res.is_err()) {
-            echo::error("Server listen failed: ", listen_res.error().message.c_str());
+    auto listen_res = listener.listen_shm(endpoint);
+    if (listen_res.is_err()) {
+        echo::error("Server listen failed: ", listen_res.error().message.c_str());
+        return;
+    }
+
+    echo::info("Server listening on SHM channel");
+
+    std::unique_ptr<netpipe::Stream> server_conn;
+
+    // Server thread
+    std::thread server_thread([&]() {
+        // Accept a connection
+        auto accept_res = listener.accept();
+        if (accept_res.is_err()) {
+            echo::error("Server accept failed: ", accept_res.error().message.c_str());
             return;
         }
+        server_conn = std::move(accept_res.value());
+        echo::info("Server accepted connection");
 
-        echo::info("Server created SHM buffers");
-
-        // Create bidirectional Remote - starts receiver thread automatically
-        netpipe::Remote<netpipe::Bidirect> remote(server);
+        // Create bidirectional Remote on accepted connection
+        netpipe::Remote<netpipe::Bidirect> remote(*server_conn);
 
         // Register server's method (method_id = 1)
         remote.register_method(1, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
@@ -41,7 +51,7 @@ void test_payload(dp::usize size_mb) {
 
         echo::info("Server registered method 1, waiting for client...");
 
-        // Wait for client to attach and register its methods
+        // Wait for client to register its methods
         std::this_thread::sleep_for(std::chrono::milliseconds(200));
 
         // Server calls client's method (method_id = 2)
@@ -53,7 +63,7 @@ void test_payload(dp::usize size_mb) {
 
         echo::info("Server calling client's method 2...");
         auto start = std::chrono::high_resolution_clock::now();
-        auto response = remote.call(2, request, 30000);
+        auto response = remote.call(2, request, 60000);
         auto end = std::chrono::high_resolution_clock::now();
 
         if (response.is_ok()) {
@@ -69,22 +79,20 @@ void test_payload(dp::usize size_mb) {
     });
 
     // Client thread
-    std::thread client_thread([size_mb]() {
-        // Wait for server to create SHM buffers
+    std::thread client_thread([&]() {
+        // Wait for server to start listening
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         netpipe::ShmStream client;
-        netpipe::ShmEndpoint endpoint{"netpipe_shm_bidirect", 1536 * 1024 * 1024}; // 1.5GB per direction
-
         auto connect_res = client.connect_shm(endpoint);
         if (connect_res.is_err()) {
             echo::error("Client connect failed: ", connect_res.error().message.c_str());
             return;
         }
 
-        echo::info("Client attached to SHM buffers");
+        echo::info("Client connected to SHM");
 
-        // Create bidirectional Remote - starts receiver thread automatically
+        // Create bidirectional Remote
         netpipe::Remote<netpipe::Bidirect> remote(client);
 
         // Register client's method (method_id = 2)
@@ -107,7 +115,7 @@ void test_payload(dp::usize size_mb) {
 
         echo::info("Client calling server's method 1...");
         auto start = std::chrono::high_resolution_clock::now();
-        auto response = remote.call(1, request, 30000);
+        auto response = remote.call(1, request, 60000);
         auto end = std::chrono::high_resolution_clock::now();
 
         if (response.is_ok()) {
@@ -125,11 +133,12 @@ void test_payload(dp::usize size_mb) {
     server_thread.join();
     client_thread.join();
 
+    listener.close();
     echo::info("");
 }
 
 int main() {
-    echo::info("=== SHM + Bidirect RPC (Two Buffer Architecture) ===");
+    echo::info("=== SHM + Bidirect RPC (TCP-like semantics) ===");
     echo::info("");
 
     test_payload(1);    // 1MB

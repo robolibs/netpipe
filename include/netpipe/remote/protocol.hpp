@@ -6,9 +6,9 @@
 namespace netpipe {
     namespace remote {
 
-        /// Maximum message size (1GB by default)
+        /// Maximum message size (2GB by default)
         /// Messages exceeding this size will be rejected to prevent memory exhaustion
-        constexpr dp::u32 MAX_MESSAGE_SIZE = 1024 * 1024 * 1024; // 1GB
+        constexpr dp::u64 MAX_MESSAGE_SIZE = 2ULL * 1024 * 1024 * 1024; // 2GB
 
         /// Message types
         enum class MessageType : dp::u8 {

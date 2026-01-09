@@ -339,7 +339,7 @@ TEST_CASE("IPC + Remote<Bidirect> - 100MB payload") {
     server_stream.close();
 }
 
-TEST_CASE("IPC + Remote<Bidirect> - 1GB payload" * doctest::skip()) {
+TEST_CASE("IPC + Remote<Bidirect> - 1GB payload") {
     constexpr dp::usize PAYLOAD_SIZE = 1024 * 1024 * 1024; // 1 GB
     constexpr dp::u32 METHOD_ECHO = 1;
     constexpr dp::u32 METHOD_VERIFY = 2;
