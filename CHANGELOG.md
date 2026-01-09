@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.7] - 2026-01-09
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Handle bidirection remote handler cancellation correctly
+
 ## [0.0.6] - 2026-01-09
 
 ### <!-- 0 -->⛰️  Features
