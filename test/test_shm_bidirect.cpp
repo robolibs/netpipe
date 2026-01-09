@@ -188,6 +188,7 @@ TEST_CASE("ShmStream + Remote<Bidirect> - 10MB payload") {
     listener.close();
 }
 
+#ifdef BIG_TRANSFER
 TEST_CASE("ShmStream + Remote<Bidirect> - 100MB payload") {
     const size_t PAYLOAD_SIZE = 100 * 1024 * 1024;
     const dp::u32 METHOD_PING = 1;
@@ -351,3 +352,4 @@ TEST_CASE("ShmStream + Remote<Bidirect> - 1GB payload") {
 
     listener.close();
 }
+#endif // BIG_TRANSFER

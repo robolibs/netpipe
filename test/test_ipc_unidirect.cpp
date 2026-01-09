@@ -133,6 +133,7 @@ TEST_CASE("IpcStream + Remote<Unidirect> - 10MB payload") {
     server.close();
 }
 
+#ifdef BIG_TRANSFER
 TEST_CASE("IpcStream + Remote<Unidirect> - 100MB payload") {
     netpipe::IpcStream server;
     netpipe::IpcEndpoint endpoint{"/tmp/netpipe_test_ipc_unidirect_100mb.sock"};
@@ -263,3 +264,4 @@ TEST_CASE("IpcStream + Remote<Unidirect> - 1GB payload") {
     server_thread.join();
     server.close();
 }
+#endif // BIG_TRANSFER

@@ -86,6 +86,7 @@ end
 -- Options
 option("examples", {default = false, showmenu = true, description = "Build examples"})
 option("tests",    {default = false, showmenu = true, description = "Enable tests"})
+option("big_transfer", {default = false, showmenu = true, description = "Enable 100MB+ transfer tests (slow)"})
 option("short_namespace", {default = false, showmenu = true, description = "Enable short namespace alias"})
 option("expose_all", {default = false, showmenu = true, description = "Expose all submodule functions in optinum:: namespace"})
 
@@ -226,9 +227,13 @@ if os.projectdir() == os.curdir() then
     end
 
     if has_config("tests") then
+        local test_defines = {"DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN"}
+        if has_config("big_transfer") then
+            table.insert(test_defines, "BIG_TRANSFER")
+        end
         add_binaries("test/**.cpp", {
             packages = TEST_DEP_NAMES,
-            defines = {"DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN"},
+            defines = test_defines,
             syslinks = {"pthread"},
             is_test = true
         })

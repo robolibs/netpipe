@@ -147,6 +147,7 @@ TEST_CASE("SHM + Remote<Unidirect> - 10MB payload") {
     listener.close();
 }
 
+#ifdef BIG_TRANSFER
 TEST_CASE("SHM + Remote<Unidirect> - 100MB payload") {
     constexpr dp::usize PAYLOAD_SIZE = 100 * 1024 * 1024;
     constexpr dp::usize BUFFER_SIZE = 512 * 1024 * 1024;
@@ -284,3 +285,4 @@ TEST_CASE("SHM + Remote<Unidirect> - 1GB payload") {
     client_stream.close();
     listener.close();
 }
+#endif // BIG_TRANSFER

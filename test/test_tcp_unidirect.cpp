@@ -150,6 +150,7 @@ TEST_CASE("TCP Unidirect - 10MB payload") {
     server.close();
 }
 
+#ifdef BIG_TRANSFER
 TEST_CASE("TCP Unidirect - 100MB payload") {
     netpipe::TcpStream server;
     netpipe::TcpEndpoint endpoint{"127.0.0.1", 18103};
@@ -294,3 +295,4 @@ TEST_CASE("TCP Unidirect - 1GB payload") {
     client_thread.join();
     server.close();
 }
+#endif // BIG_TRANSFER

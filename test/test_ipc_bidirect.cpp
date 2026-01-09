@@ -238,6 +238,7 @@ TEST_CASE("IPC + Remote<Bidirect> - 10MB payload") {
     server_stream.close();
 }
 
+#ifdef BIG_TRANSFER
 TEST_CASE("IPC + Remote<Bidirect> - 100MB payload") {
     constexpr dp::usize PAYLOAD_SIZE = 100 * 1024 * 1024; // 100 MB
     constexpr dp::u32 METHOD_ECHO = 1;
@@ -452,3 +453,4 @@ TEST_CASE("IPC + Remote<Bidirect> - 1GB payload") {
     server_thread.join();
     server_stream.close();
 }
+#endif // BIG_TRANSFER
