@@ -45,7 +45,7 @@ namespace netpipe {
             fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                return dp::result::err(dp::Error::io_error(dp::String("socket creation failed: ") + strerror(errno)));
             }
             echo::trace("socket created fd=", fd_);
 
@@ -85,7 +85,7 @@ namespace netpipe {
             if (ret != 0) {
                 ::close(fd_);
                 fd_ = -1;
-                echo::error("getaddrinfo failed: ", gai_strerror(ret));
+                echo::error("getaddrinfo failed for ", endpoint.to_string(), ": ", gai_strerror(ret));
                 return dp::result::err(dp::Error::io_error("getaddrinfo failed"));
             }
 
@@ -96,7 +96,7 @@ namespace netpipe {
             if (ret < 0) {
                 ::close(fd_);
                 fd_ = -1;
-                echo::error("connect failed: ", strerror(errno));
+                echo::error("connect failed to ", endpoint.to_string(), ": ", strerror(errno));
                 return dp::result::err(dp::Error::io_error("connect failed"));
             }
 
@@ -125,7 +125,7 @@ namespace netpipe {
             fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                return dp::result::err(dp::Error::io_error(dp::String("socket creation failed: ") + strerror(errno)));
             }
             echo::trace("socket created fd=", fd_);
 
@@ -169,23 +169,24 @@ namespace netpipe {
                     ::close(fd_);
                     fd_ = -1;
                     echo::error("invalid address: ", endpoint.host.c_str());
-                    return dp::result::err(dp::Error::invalid_argument("invalid argument"));
+                    return dp::result::err(
+                        dp::Error::invalid_argument(dp::String("invalid IP address: ") + endpoint.host));
                 }
             }
 
             if (::bind(fd_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
                 ::close(fd_);
                 fd_ = -1;
-                echo::error("bind failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                echo::error("bind failed on ", endpoint.to_string(), ": ", strerror(errno));
+                return dp::result::err(dp::Error::io_error("bind failed"));
             }
 
             // Start listening
             if (::listen(fd_, SOMAXCONN) < 0) {
                 ::close(fd_);
                 fd_ = -1;
-                echo::error("listen failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                echo::error("listen failed on ", endpoint.to_string(), ": ", strerror(errno));
+                return dp::result::err(dp::Error::io_error("listen failed"));
             }
 
             listening_ = true;
@@ -210,8 +211,8 @@ namespace netpipe {
 
             dp::i32 client_fd = ::accept(fd_, (struct sockaddr *)&client_addr, &client_len);
             if (client_fd < 0) {
-                echo::error("accept failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                echo::error("accept failed on ", local_endpoint_.to_string(), ": ", strerror(errno));
+                return dp::result::err(dp::Error::io_error("accept failed"));
             }
 
             // Enable TCP_NODELAY on accepted client socket for low-latency RPC
@@ -353,7 +354,8 @@ namespace netpipe {
 
             if (::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
                 echo::error("setsockopt SO_RCVTIMEO failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("failed to set timeout"));
+                return dp::result::err(
+                    dp::Error::io_error(dp::String("failed to set recv timeout: ") + strerror(errno)));
             }
 
             echo::trace("set recv timeout to ", timeout_ms, "ms");
