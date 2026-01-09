@@ -24,11 +24,9 @@
 // Higher-level protocols
 #include <netpipe/remote/async.hpp>
 #include <netpipe/remote/metrics.hpp>
-#include <netpipe/remote/peer.hpp>
 #include <netpipe/remote/remote.hpp>
 #include <netpipe/remote/serialization.hpp>
 #include <netpipe/remote/streaming.hpp>
-#include <netpipe/rpc.hpp> // Deprecated: use netpipe/remote/remote.hpp
 
 // All types are in the netpipe:: namespace
 // Available types:
@@ -38,5 +36,5 @@
 //   - netpipe::TcpStream, IpcStream, ShmStream
 //   - netpipe::Datagram (base class)
 //   - netpipe::UdpDatagram, LoraDatagram
-//   - netpipe::Remote (new name for RPC)
-//   - netpipe::Rpc (deprecated: use Remote)
+//   - netpipe::Remote<Unidirect> - Simple client-server RPC
+//   - netpipe::Remote<Bidirect> - Bidirectional peer-to-peer RPC with concurrency

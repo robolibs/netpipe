@@ -4,15 +4,15 @@ cmake_minimum_required(VERSION 3.15)
 # Project configuration
 # ==================================================================================================
 set(PROJECT_NAME netpipe)
-set(PROJECT_VERSION "0.0.5")
+set(PROJECT_VERSION "0.0.6")
 
 # Dependencies formats:
 #   Git:    set(LIB_DEPS "name|https://github.com/org/repo.git|tag" ...)
 #   Find:   set(LIB_DEPS "name" ...)  # Uses find_package
 #   Pkg:    set(LIB_DEPS "pkg::name" ...)  # Uses pkg-config
 set(LIB_DEPS
-    "echo|https://github.com/bresilla/echo.git|0.0.19"
-    "datapod|https://github.com/robolibs/datapod.git|0.0.31"
+    "echo|https://github.com/bresilla/echo.git|0.0.23"
+    "datapod|https://github.com/robolibs/datapod.git|0.0.34"
 )
 set(EXAMPLE_DEPS
     "wirebit|https://github.com/robolibs/wirebit.git|0.0.9"
@@ -95,6 +95,7 @@ else()
 endif()
 option(${PROJECT_NAME_UPPER}_BUILD_EXAMPLES "Build examples" OFF)
 option(${PROJECT_NAME_UPPER}_ENABLE_TESTS "Enable tests" OFF)
+option(${PROJECT_NAME_UPPER}_BIG_TRANSFER "Enable 100MB+ transfer tests (slow)" OFF)
 option(SHORT_NAMESPACE "Enable short namespace alias" ON)
 option(EXPOSE_ALL "Expose all submodule functions in namespace" OFF)
 
@@ -225,7 +226,8 @@ if(${PROJECT_NAME_UPPER}_ENABLE_TESTS)
     foreach(src_file IN LISTS test_sources)
         get_filename_component(test_name "${src_file}" NAME_WE)
         add_executable(${test_name} "${src_file}")
-        target_compile_definitions(${test_name} PRIVATE SHORT_NAMESPACE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN PROJECT_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+        target_compile_definitions(${test_name} PRIVATE SHORT_NAMESPACE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN PROJECT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+            $<$<BOOL:${${PROJECT_NAME_UPPER}_BIG_TRANSFER}>:BIG_TRANSFER>)
         target_link_libraries(${test_name} ${PROJECT_NAME}::${PROJECT_NAME} ${ALL_TEST_DEPS})
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()

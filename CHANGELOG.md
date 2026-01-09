@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.0.6] - 2026-01-09
+
+### <!-- 0 -->⛰️  Features
+
+- Improve ShmStream message framing and robustness
+- Add SHM RPC support in netpipe library
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Improve IPC test stability and logic
+- Refactor ShmStream for bulk shared memory transfer
+- Refactor ShmStream for TCP-like accept/connect semantics
+- Adjust SHM/IPC/TCP payload and buffer sizes
+- Resolve all bidirectional RPC deadlocks and test hangs
+- Resolve TCP bidirectional RPC deadlock and test hangs
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Enable optional big transfer tests
+- Update echo library version to 0.0.23
+
 ## [0.0.5] - 2026-01-07
 
 ### <!-- 0 -->⛰️  Features
