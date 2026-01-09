@@ -352,13 +352,22 @@ namespace netpipe {
             }
 
           public:
-            explicit Remote(Stream &stream, dp::usize max_concurrent = 100, bool enable_metrics = false)
+            /// Constructor for bidirectional RPC
+            /// @param stream The underlying stream for communication
+            /// @param max_concurrent Maximum number of concurrent pending requests (default: 100)
+            /// @param enable_metrics Enable metrics collection (default: false)
+            /// @param recv_timeout_ms Receiver thread timeout in milliseconds (default: 100)
+            ///        Lower timeout = faster shutdown, higher CPU usage
+            ///        Higher timeout = slower shutdown, lower CPU usage
+            explicit Remote(Stream &stream, dp::usize max_concurrent = 100, bool enable_metrics = false,
+                            dp::u32 recv_timeout_ms = 100)
                 : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent),
                   enable_metrics_(enable_metrics) {
                 echo::trace("Remote<Bidirect> constructed, max_concurrent=", max_concurrent,
-                            " metrics=", enable_metrics);
+                            " metrics=", enable_metrics, " recv_timeout=", recv_timeout_ms, "ms");
                 // Set receive timeout to allow receiver thread to check running_ flag
-                stream_.set_recv_timeout(100); // 100ms timeout
+                // Configurable timeout allows tuning for different use cases
+                stream_.set_recv_timeout(recv_timeout_ms);
                 receiver_thread_ = std::thread(&Remote::receiver_loop, this);
             }
 
