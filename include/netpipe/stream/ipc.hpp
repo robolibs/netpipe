@@ -27,6 +27,20 @@ namespace netpipe {
             echo::debug("IpcStream created from accepted connection fd=", fd);
         }
 
+        // Helper to cleanup on fatal errors
+        // Closes socket and resets state without unlinking (only close() unlinks)
+        void cleanup_on_error() {
+            if (fd_ >= 0) {
+                echo::trace("cleanup_on_error: closing fd=", fd_);
+                ::close(fd_);
+                fd_ = -1;
+            }
+            connected_ = false;
+            listening_ = false;
+            // Note: We don't unlink here - only close() unlinks listening sockets
+            // This prevents accidental removal of socket files on transient errors
+        }
+
       public:
         IpcStream() : fd_(-1), connected_(false), listening_(false), should_unlink_(false) {
             echo::trace("IpcStream constructed");
@@ -193,8 +207,8 @@ namespace netpipe {
             // Send length prefix
             auto res = write_exact(fd_, length_bytes.data(), 4);
             if (res.is_err()) {
-                connected_ = false;
                 echo::trace("send length failed: ", res.error().message.c_str());
+                cleanup_on_error();
                 return res;
             }
 
@@ -202,8 +216,8 @@ namespace netpipe {
             if (!msg.empty()) {
                 res = write_exact(fd_, msg.data(), msg.size());
                 if (res.is_err()) {
-                    connected_ = false;
                     echo::trace("send payload failed: ", res.error().message.c_str());
+                    cleanup_on_error();
                     return res;
                 }
             }
@@ -231,11 +245,11 @@ namespace netpipe {
             dp::Array<dp::u8, 4> length_bytes;
             auto res = read_exact(fd_, length_bytes.data(), 4);
             if (res.is_err()) {
-                // Only mark as disconnected for non-timeout errors
+                // Only cleanup for non-timeout errors
                 // Timeout is expected behavior - connection stays alive
                 if (res.error().code != dp::Error::TIMEOUT) {
-                    connected_ = false;
                     echo::trace("recv length failed: ", res.error().message.c_str());
+                    cleanup_on_error();
                 }
                 return dp::result::err(res.error());
             }
@@ -246,7 +260,7 @@ namespace netpipe {
             // Validate message size before allocating
             if (length > remote::MAX_MESSAGE_SIZE) {
                 echo::error("received message too large: ", length, " bytes (max: ", remote::MAX_MESSAGE_SIZE, ")");
-                connected_ = false;
+                cleanup_on_error();
                 return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
             }
 
@@ -256,21 +270,21 @@ namespace netpipe {
                 msg.resize(length);
             } catch (const std::bad_alloc &e) {
                 echo::error("failed to allocate message buffer: ", length, " bytes - ", e.what());
-                connected_ = false;
+                cleanup_on_error();
                 return dp::result::err(dp::Error::io_error("memory allocation failed"));
             } catch (const std::exception &e) {
                 echo::error("unexpected error allocating message buffer: ", e.what());
-                connected_ = false;
+                cleanup_on_error();
                 return dp::result::err(dp::Error::io_error("allocation error"));
             }
             if (length > 0) {
                 res = read_exact(fd_, msg.data(), length);
                 if (res.is_err()) {
-                    // Only mark as disconnected for non-timeout errors
+                    // Only cleanup for non-timeout errors
                     // Timeout during payload read keeps connection alive
                     if (res.error().code != dp::Error::TIMEOUT) {
-                        connected_ = false;
                         echo::trace("recv payload failed: ", res.error().message.c_str());
+                        cleanup_on_error();
                     }
                     return dp::result::err(res.error());
                 }
