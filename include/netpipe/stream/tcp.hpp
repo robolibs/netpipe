@@ -310,8 +310,19 @@ namespace netpipe {
                 return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
             }
 
-            // Read payload
-            Message msg(length);
+            // Allocate message buffer with exception handling
+            Message msg;
+            try {
+                msg.resize(length);
+            } catch (const std::bad_alloc &e) {
+                echo::error("failed to allocate message buffer: ", length, " bytes - ", e.what());
+                connected_ = false;
+                return dp::result::err(dp::Error::io_error("memory allocation failed"));
+            } catch (const std::exception &e) {
+                echo::error("unexpected error allocating message buffer: ", e.what());
+                connected_ = false;
+                return dp::result::err(dp::Error::io_error("allocation error"));
+            }
             if (length > 0) {
                 res = read_exact(fd_, msg.data(), length);
                 if (res.is_err()) {
