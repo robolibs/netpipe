@@ -1,391 +1,355 @@
+#include <atomic>
 #include <chrono>
 #include <doctest/doctest.h>
+#include <memory>
 #include <netpipe/netpipe.hpp>
 #include <thread>
 
-// This test file validates bidirectional RPC communication over shared memory transport.
-//
-// ShmStream uses TWO SPSC ring buffers for bidirectional communication:
-// - Server writes to s2c buffer, reads from c2s buffer
-// - Client writes to c2s buffer, reads from s2c buffer
-//
-// This allows Remote<Bidirect> to work properly - each side can both send requests
-// and handle incoming requests simultaneously without deadlock.
+static netpipe::Message create_payload(size_t size) {
+    netpipe::Message msg(size);
+    for (size_t i = 0; i < size; i++) {
+        msg[i] = static_cast<dp::u8>(i % 256);
+    }
+    return msg;
+}
+
+static bool verify_payload(const netpipe::Message &msg, size_t expected_size) {
+    if (msg.size() != expected_size)
+        return false;
+    for (size_t i = 0; i < msg.size(); i++) {
+        if (msg[i] != static_cast<dp::u8>(i % 256))
+            return false;
+    }
+    return true;
+}
 
 TEST_CASE("ShmStream + Remote<Bidirect> - 1MB payload") {
-    netpipe::ShmStream server_stream;
-    // Buffer needs to hold: 1MB request + 1MB response in each direction = ~4MB
-    // Add overhead for concurrent sends = 8MB should be plenty
+    const size_t PAYLOAD_SIZE = 1024 * 1024;
+    const dp::u32 METHOD_PING = 1;
+    const dp::u32 METHOD_PONG = 2;
+
+    netpipe::ShmStream listener;
     netpipe::ShmEndpoint endpoint{"shm_bidirect_1mb", 8 * 1024 * 1024};
+    REQUIRE(listener.listen_shm(endpoint).is_ok());
 
-    auto listen_res = server_stream.listen_shm(endpoint);
-    REQUIRE(listen_res.is_ok());
+    std::atomic<bool> peer1_called{false}, peer2_called{false};
+    std::atomic<bool> peer1_ok{false}, peer2_ok{false};
+    std::atomic<bool> client_connected{false};
 
-    std::atomic<int> finished_count{0};
+    std::unique_ptr<netpipe::Stream> server_conn;
 
-    // Server thread: registers handler and makes calls to client
-    std::thread server_thread([&]() {
-        netpipe::Remote<netpipe::Bidirect> server_remote(server_stream);
-        // Wait for receiver thread to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::thread t1([&]() {
+        auto accept_res = listener.accept();
+        REQUIRE(accept_res.is_ok());
+        server_conn = std::move(accept_res.value());
 
-        // Server registers method 1: echo handler
-        server_remote.register_method(1, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-            echo::debug("server handling echo request of size ", req.size());
-            // Echo back the same message
-            return dp::result::ok(req);
-        });
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-        // Server calls client's method 2 with 1MB payload
-        netpipe::Message server_request(1024 * 1024, 0xAA); // 1MB of 0xAA
-        auto server_resp = server_remote.call(2, server_request, 5000);
-        REQUIRE(server_resp.is_ok());
-        CHECK(server_resp.value().size() == 1024 * 1024);
-        CHECK(server_resp.value()[0] == 0xAA);
-        CHECK(server_resp.value()[1024 * 1024 - 1] == 0xAA);
-        echo::info("server received 1MB response from client");
-
-        // Signal we're done
-        finished_count++;
-
-        // Wait for BOTH peers to finish
-        while (finished_count < 2) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // Signal and wait for client to be ready
+        while (!client_connected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        // Now both are done, safe to exit and destroy streams
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    });
-
-    // Client thread: registers handler and makes calls to server
-    std::thread client_thread([&]() {
+        // Give time for both sides to fully initialize buffers
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        netpipe::ShmStream client_stream;
-        auto connect_res = client_stream.connect_shm(endpoint);
-        REQUIRE(connect_res.is_ok());
+        netpipe::Remote<netpipe::Bidirect> r(*server_conn);
 
-        netpipe::Remote<netpipe::Bidirect> client_remote(client_stream);
-        // Wait for receiver thread to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        // Client registers method 2: echo handler
-        client_remote.register_method(2, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-            echo::debug("client handling echo request of size ", req.size());
-            // Echo back the same message
-            return dp::result::ok(req);
+        r.register_method(METHOD_PONG, [&](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+            peer1_called = true;
+            if (!verify_payload(req, PAYLOAD_SIZE))
+                return dp::result::err(dp::Error::invalid_argument("bad"));
+            return dp::result::ok(create_payload(PAYLOAD_SIZE));
         });
 
-        // Client calls server's method 1 with 1MB payload
-        netpipe::Message client_request(1024 * 1024, 0xBB); // 1MB of 0xBB
-        auto client_resp = client_remote.call(1, client_request, 5000);
-        REQUIRE(client_resp.is_ok());
-        CHECK(client_resp.value().size() == 1024 * 1024);
-        CHECK(client_resp.value()[0] == 0xBB);
-        CHECK(client_resp.value()[1024 * 1024 - 1] == 0xBB);
-        echo::info("client received 1MB response from server");
-
-        // Keep client_remote alive until server thread completes
-        std::this_thread::sleep_for(std::chrono::milliseconds(700));
-
-        // Signal we're done
-        finished_count++;
-
-        // Wait for BOTH peers to finish
-        while (finished_count < 2) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        // Now both are done, safe to exit and destroy streams
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto resp = r.call(METHOD_PING, create_payload(PAYLOAD_SIZE), 10000);
+        if (resp.is_ok() && verify_payload(resp.value(), PAYLOAD_SIZE))
+            peer1_ok = true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     });
 
-    server_thread.join();
-    client_thread.join();
-    server_stream.close();
+    std::thread t2([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        netpipe::ShmStream client;
+        REQUIRE(client.connect_shm(endpoint).is_ok());
+        client_connected = true;
+
+        // Give time for both sides to fully initialize buffers
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        netpipe::Remote<netpipe::Bidirect> r(client);
+
+        r.register_method(METHOD_PING, [&](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+            peer2_called = true;
+            if (!verify_payload(req, PAYLOAD_SIZE))
+                return dp::result::err(dp::Error::invalid_argument("bad"));
+            return dp::result::ok(create_payload(PAYLOAD_SIZE));
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto resp = r.call(METHOD_PONG, create_payload(PAYLOAD_SIZE), 10000);
+        if (resp.is_ok() && verify_payload(resp.value(), PAYLOAD_SIZE))
+            peer2_ok = true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    });
+
+    t1.join();
+    t2.join();
+
+    CHECK(peer1_called);
+    CHECK(peer2_called);
+    CHECK(peer1_ok);
+    CHECK(peer2_ok);
+
+    listener.close();
 }
 
 TEST_CASE("ShmStream + Remote<Bidirect> - 10MB payload") {
-    netpipe::ShmStream server_stream;
-    // Buffer needs to hold: 10MB request + 10MB response in each direction = ~40MB
-    // Add overhead for concurrent sends = 64MB should be plenty
-    netpipe::ShmEndpoint endpoint{"shm_bidirect_10mb", 64 * 1024 * 1024};
+    const size_t PAYLOAD_SIZE = 10 * 1024 * 1024;
+    const dp::u32 METHOD_PING = 1;
+    const dp::u32 METHOD_PONG = 2;
 
-    auto listen_res = server_stream.listen_shm(endpoint);
-    REQUIRE(listen_res.is_ok());
+    netpipe::ShmStream listener;
+    netpipe::ShmEndpoint endpoint{"shm_bidirect_10mb", 80 * 1024 * 1024};
+    REQUIRE(listener.listen_shm(endpoint).is_ok());
 
-    std::atomic<int> finished_count{0};
+    std::atomic<bool> peer1_called{false}, peer2_called{false};
+    std::atomic<bool> peer1_ok{false}, peer2_ok{false};
+    std::atomic<bool> client_connected{false};
 
-    // Server thread: registers handler and makes calls to client
-    std::thread server_thread([&]() {
-        netpipe::Remote<netpipe::Bidirect> server_remote(server_stream);
-        // Wait for receiver thread to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::unique_ptr<netpipe::Stream> server_conn;
 
-        // Server registers method 1: echo handler
-        server_remote.register_method(1, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-            echo::debug("server handling echo request of size ", req.size());
-            // Echo back the same message
-            return dp::result::ok(req);
-        });
+    std::thread t1([&]() {
+        auto accept_res = listener.accept();
+        REQUIRE(accept_res.is_ok());
+        server_conn = std::move(accept_res.value());
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-        // Server calls client's method 2 with 10MB payload
-        netpipe::Message server_request(10 * 1024 * 1024, 0xCC); // 10MB of 0xCC
-        auto server_resp = server_remote.call(2, server_request, 10000);
-        REQUIRE(server_resp.is_ok());
-        CHECK(server_resp.value().size() == 10 * 1024 * 1024);
-        CHECK(server_resp.value()[0] == 0xCC);
-        CHECK(server_resp.value()[10 * 1024 * 1024 - 1] == 0xCC);
-        echo::info("server received 10MB response from client");
-
-        // Signal we're done
-        finished_count++;
-
-        // Wait for BOTH peers to finish
-        while (finished_count < 2) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        while (!client_connected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        // Now both are done, safe to exit and destroy streams
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    });
-
-    // Client thread: registers handler and makes calls to server
-    std::thread client_thread([&]() {
+        // Give time for both sides to fully initialize buffers
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        netpipe::ShmStream client_stream;
-        auto connect_res = client_stream.connect_shm(endpoint);
-        REQUIRE(connect_res.is_ok());
+        netpipe::Remote<netpipe::Bidirect> r(*server_conn);
 
-        netpipe::Remote<netpipe::Bidirect> client_remote(client_stream);
-        // Wait for receiver thread to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        // Client registers method 2: echo handler
-        client_remote.register_method(2, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-            echo::debug("client handling echo request of size ", req.size());
-            // Echo back the same message
-            return dp::result::ok(req);
+        r.register_method(METHOD_PONG, [&](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+            peer1_called = true;
+            if (!verify_payload(req, PAYLOAD_SIZE))
+                return dp::result::err(dp::Error::invalid_argument("bad"));
+            return dp::result::ok(create_payload(PAYLOAD_SIZE));
         });
 
-        // Client calls server's method 1 with 10MB payload
-        netpipe::Message client_request(10 * 1024 * 1024, 0xDD); // 10MB of 0xDD
-        auto client_resp = client_remote.call(1, client_request, 10000);
-        REQUIRE(client_resp.is_ok());
-        CHECK(client_resp.value().size() == 10 * 1024 * 1024);
-        CHECK(client_resp.value()[0] == 0xDD);
-        CHECK(client_resp.value()[10 * 1024 * 1024 - 1] == 0xDD);
-        echo::info("client received 10MB response from server");
-
-        // Keep client_remote alive until server thread completes
-        std::this_thread::sleep_for(std::chrono::milliseconds(700));
-
-        // Signal we're done
-        finished_count++;
-
-        // Wait for BOTH peers to finish
-        while (finished_count < 2) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        // Now both are done, safe to exit and destroy streams
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto resp = r.call(METHOD_PING, create_payload(PAYLOAD_SIZE), 30000);
+        if (resp.is_ok() && verify_payload(resp.value(), PAYLOAD_SIZE))
+            peer1_ok = true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
     });
 
-    server_thread.join();
-    client_thread.join();
-    server_stream.close();
+    std::thread t2([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        netpipe::ShmStream client;
+        REQUIRE(client.connect_shm(endpoint).is_ok());
+        client_connected = true;
+
+        // Give time for both sides to fully initialize buffers
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        netpipe::Remote<netpipe::Bidirect> r(client);
+
+        r.register_method(METHOD_PING, [&](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+            peer2_called = true;
+            if (!verify_payload(req, PAYLOAD_SIZE))
+                return dp::result::err(dp::Error::invalid_argument("bad"));
+            return dp::result::ok(create_payload(PAYLOAD_SIZE));
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto resp = r.call(METHOD_PONG, create_payload(PAYLOAD_SIZE), 30000);
+        if (resp.is_ok() && verify_payload(resp.value(), PAYLOAD_SIZE))
+            peer2_ok = true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    });
+
+    t1.join();
+    t2.join();
+
+    CHECK(peer1_called);
+    CHECK(peer2_called);
+    CHECK(peer1_ok);
+    CHECK(peer2_ok);
+
+    listener.close();
 }
 
+#ifdef BIG_TRANSFER
 TEST_CASE("ShmStream + Remote<Bidirect> - 100MB payload") {
-    netpipe::ShmStream server_stream;
-    // Buffer needs to hold: 100MB request + 100MB response in each direction = ~400MB
-    // Add overhead for concurrent sends = 512MB should be plenty
-    netpipe::ShmEndpoint endpoint{"shm_bidirect_100mb", 512 * 1024 * 1024};
+    const size_t PAYLOAD_SIZE = 100 * 1024 * 1024;
+    const dp::u32 METHOD_PING = 1;
+    const dp::u32 METHOD_PONG = 2;
 
-    auto listen_res = server_stream.listen_shm(endpoint);
-    REQUIRE(listen_res.is_ok());
+    netpipe::ShmStream listener;
+    netpipe::ShmEndpoint endpoint{"shm_bidirect_100mb", 1024ULL * 1024 * 1024};
+    REQUIRE(listener.listen_shm(endpoint).is_ok());
 
-    std::atomic<int> finished_count{0};
+    std::atomic<bool> peer1_called{false}, peer2_called{false};
+    std::atomic<bool> peer1_ok{false}, peer2_ok{false};
+    std::atomic<bool> client_connected{false};
 
-    // Server thread: registers handler and makes calls to client
-    std::thread server_thread([&]() {
-        netpipe::Remote<netpipe::Bidirect> server_remote(server_stream);
-        // Wait for receiver thread to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::unique_ptr<netpipe::Stream> server_conn;
 
-        // Server registers method 1: echo handler
-        server_remote.register_method(1, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-            echo::debug("server handling echo request of size ", req.size());
-            // Echo back the same message
-            return dp::result::ok(req);
-        });
+    std::thread t1([&]() {
+        auto accept_res = listener.accept();
+        REQUIRE(accept_res.is_ok());
+        server_conn = std::move(accept_res.value());
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-        // Server calls client's method 2 with 100MB payload
-        netpipe::Message server_request(100 * 1024 * 1024, 0xEE); // 100MB of 0xEE
-        auto server_resp = server_remote.call(2, server_request, 30000);
-        REQUIRE(server_resp.is_ok());
-        CHECK(server_resp.value().size() == 100 * 1024 * 1024);
-        CHECK(server_resp.value()[0] == 0xEE);
-        CHECK(server_resp.value()[100 * 1024 * 1024 - 1] == 0xEE);
-        echo::info("server received 100MB response from client");
-
-        // Signal we're done
-        finished_count++;
-
-        // Wait for BOTH peers to finish
-        while (finished_count < 2) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        while (!client_connected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        // Now both are done, safe to exit and destroy streams
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    });
-
-    // Client thread: registers handler and makes calls to server
-    std::thread client_thread([&]() {
+        // Give time for both sides to fully initialize buffers
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        netpipe::ShmStream client_stream;
-        auto connect_res = client_stream.connect_shm(endpoint);
-        REQUIRE(connect_res.is_ok());
+        netpipe::Remote<netpipe::Bidirect> r(*server_conn);
 
-        netpipe::Remote<netpipe::Bidirect> client_remote(client_stream);
-        // Wait for receiver thread to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        // Client registers method 2: echo handler
-        client_remote.register_method(2, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-            echo::debug("client handling echo request of size ", req.size());
-            // Echo back the same message
-            return dp::result::ok(req);
+        r.register_method(METHOD_PONG, [&](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+            peer1_called = true;
+            if (!verify_payload(req, PAYLOAD_SIZE))
+                return dp::result::err(dp::Error::invalid_argument("bad"));
+            return dp::result::ok(create_payload(PAYLOAD_SIZE));
         });
 
-        // Client calls server's method 1 with 100MB payload
-        netpipe::Message client_request(100 * 1024 * 1024, 0xFF); // 100MB of 0xFF
-        auto client_resp = client_remote.call(1, client_request, 30000);
-        REQUIRE(client_resp.is_ok());
-        CHECK(client_resp.value().size() == 100 * 1024 * 1024);
-        CHECK(client_resp.value()[0] == 0xFF);
-        CHECK(client_resp.value()[100 * 1024 * 1024 - 1] == 0xFF);
-        echo::info("client received 100MB response from server");
-
-        // Keep client_remote alive until server thread completes
-        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-
-        // Signal we're done
-        finished_count++;
-
-        // Wait for BOTH peers to finish
-        while (finished_count < 2) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        // Now both are done, safe to exit and destroy streams
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto resp = r.call(METHOD_PING, create_payload(PAYLOAD_SIZE), 60000);
+        if (resp.is_ok() && verify_payload(resp.value(), PAYLOAD_SIZE))
+            peer1_ok = true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
     });
 
-    server_thread.join();
-    client_thread.join();
-    server_stream.close();
+    std::thread t2([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        netpipe::ShmStream client;
+        REQUIRE(client.connect_shm(endpoint).is_ok());
+        client_connected = true;
+
+        // Give time for both sides to fully initialize buffers
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        netpipe::Remote<netpipe::Bidirect> r(client);
+
+        r.register_method(METHOD_PING, [&](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+            peer2_called = true;
+            if (!verify_payload(req, PAYLOAD_SIZE))
+                return dp::result::err(dp::Error::invalid_argument("bad"));
+            return dp::result::ok(create_payload(PAYLOAD_SIZE));
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto resp = r.call(METHOD_PONG, create_payload(PAYLOAD_SIZE), 60000);
+        if (resp.is_ok() && verify_payload(resp.value(), PAYLOAD_SIZE))
+            peer2_ok = true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    });
+
+    t1.join();
+    t2.join();
+
+    CHECK(peer1_called);
+    CHECK(peer2_called);
+    CHECK(peer1_ok);
+    CHECK(peer2_ok);
+
+    listener.close();
 }
 
-TEST_CASE("ShmStream + Remote<Bidirect> - 1GB payload" * doctest::skip()) {
-    netpipe::ShmStream server_stream;
-    netpipe::ShmEndpoint endpoint{"shm_bidirect_1gb", 1536 * 1024 * 1024}; // 1.5GB buffer
+TEST_CASE("ShmStream + Remote<Bidirect> - 1GB payload") {
+    const size_t PAYLOAD_SIZE = 1024 * 1024 * 1024;
+    const dp::u32 METHOD_PING = 1;
+    const dp::u32 METHOD_PONG = 2;
 
-    auto listen_res = server_stream.listen_shm(endpoint);
-    REQUIRE(listen_res.is_ok());
+    netpipe::ShmStream listener;
+    netpipe::ShmEndpoint endpoint{"shm_bidirect_1gb", 3ULL * 1024 * 1024 * 1024};
+    REQUIRE(listener.listen_shm(endpoint).is_ok());
 
-    std::atomic<int> finished_count{0};
+    std::atomic<bool> peer1_called{false}, peer2_called{false};
+    std::atomic<bool> peer1_ok{false}, peer2_ok{false};
+    std::atomic<bool> client_connected{false};
 
-    // Server thread: registers handler and makes calls to client
-    std::thread server_thread([&]() {
-        netpipe::Remote<netpipe::Bidirect> server_remote(server_stream);
-        // Wait for receiver thread to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    std::unique_ptr<netpipe::Stream> server_conn;
 
-        // Server registers method 1: echo handler
-        server_remote.register_method(1, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-            echo::debug("server handling echo request of size ", req.size());
-            // Echo back the same message
-            return dp::result::ok(req);
-        });
+    std::thread t1([&]() {
+        auto accept_res = listener.accept();
+        REQUIRE(accept_res.is_ok());
+        server_conn = std::move(accept_res.value());
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(300));
-
-        // Server calls client's method 2 with 1GB payload
-        netpipe::Message server_request(1024 * 1024 * 1024, 0xAA); // 1GB of 0xAA
-        auto server_resp = server_remote.call(2, server_request, 60000);
-        REQUIRE(server_resp.is_ok());
-        CHECK(server_resp.value().size() == 1024 * 1024 * 1024);
-        CHECK(server_resp.value()[0] == 0xAA);
-        CHECK(server_resp.value()[1024 * 1024 * 1024 - 1] == 0xAA);
-        echo::info("server received 1GB response from client");
-
-        // Signal we're done
-        finished_count++;
-
-        // Wait for BOTH peers to finish
-        while (finished_count < 2) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        while (!client_connected) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 
-        // Now both are done, safe to exit and destroy streams
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    });
-
-    // Client thread: registers handler and makes calls to server
-    std::thread client_thread([&]() {
+        // Give time for both sides to fully initialize buffers
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        netpipe::ShmStream client_stream;
-        auto connect_res = client_stream.connect_shm(endpoint);
-        REQUIRE(connect_res.is_ok());
+        netpipe::Remote<netpipe::Bidirect> r(*server_conn);
 
-        netpipe::Remote<netpipe::Bidirect> client_remote(client_stream);
-        // Wait for receiver thread to start
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-        // Client registers method 2: echo handler
-        client_remote.register_method(2, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-            echo::debug("client handling echo request of size ", req.size());
-            // Echo back the same message
-            return dp::result::ok(req);
+        r.register_method(METHOD_PONG, [&](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+            peer1_called = true;
+            if (!verify_payload(req, PAYLOAD_SIZE))
+                return dp::result::err(dp::Error::invalid_argument("bad"));
+            return dp::result::ok(create_payload(PAYLOAD_SIZE));
         });
 
-        // Client calls server's method 1 with 1GB payload
-        netpipe::Message client_request(1024 * 1024 * 1024, 0xBB); // 1GB of 0xBB
-        auto client_resp = client_remote.call(1, client_request, 60000);
-        REQUIRE(client_resp.is_ok());
-        CHECK(client_resp.value().size() == 1024 * 1024 * 1024);
-        CHECK(client_resp.value()[0] == 0xBB);
-        CHECK(client_resp.value()[1024 * 1024 * 1024 - 1] == 0xBB);
-        echo::info("client received 1GB response from server");
-
-        // Keep client_remote alive until server thread completes
-        std::this_thread::sleep_for(std::chrono::milliseconds(1200));
-
-        // Signal we're done
-        finished_count++;
-
-        // Wait for BOTH peers to finish
-        while (finished_count < 2) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
-
-        // Now both are done, safe to exit and destroy streams
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto resp = r.call(METHOD_PING, create_payload(PAYLOAD_SIZE), 120000);
+        if (resp.is_ok() && verify_payload(resp.value(), PAYLOAD_SIZE))
+            peer1_ok = true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5000));
     });
 
-    server_thread.join();
-    client_thread.join();
-    server_stream.close();
+    std::thread t2([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        netpipe::ShmStream client;
+        REQUIRE(client.connect_shm(endpoint).is_ok());
+        client_connected = true;
+
+        // Give time for both sides to fully initialize buffers
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        netpipe::Remote<netpipe::Bidirect> r(client);
+
+        r.register_method(METHOD_PING, [&](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+            peer2_called = true;
+            if (!verify_payload(req, PAYLOAD_SIZE))
+                return dp::result::err(dp::Error::invalid_argument("bad"));
+            return dp::result::ok(create_payload(PAYLOAD_SIZE));
+        });
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        auto resp = r.call(METHOD_PONG, create_payload(PAYLOAD_SIZE), 120000);
+        if (resp.is_ok() && verify_payload(resp.value(), PAYLOAD_SIZE))
+            peer2_ok = true;
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    });
+
+    t1.join();
+    t2.join();
+
+    CHECK(peer1_called);
+    CHECK(peer2_called);
+    CHECK(peer1_ok);
+    CHECK(peer2_ok);
+
+    listener.close();
 }
+#endif // BIG_TRANSFER

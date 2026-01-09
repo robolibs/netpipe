@@ -1,5 +1,6 @@
 #pragma once
 
+#include <netpipe/remote/protocol.hpp>
 #include <netpipe/stream.hpp>
 
 #include <arpa/inet.h>
@@ -27,6 +28,45 @@ namespace netpipe {
             echo::debug("TcpStream created from accepted connection fd=", fd);
         }
 
+        // Helper to configure TCP keepalive for connection health monitoring
+        // Detects dead connections automatically after ~90 seconds (60 + 3*10)
+        void configure_keepalive(dp::i32 socket_fd) {
+            // Enable SO_KEEPALIVE
+            dp::i32 keepalive = 1;
+            if (::setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) < 0) {
+                echo::warn("setsockopt SO_KEEPALIVE failed: ", strerror(errno));
+                return; // Non-fatal - continue without keepalive
+            }
+            echo::trace("SO_KEEPALIVE enabled on fd=", socket_fd);
+
+#ifdef __linux__
+            // Configure keepalive parameters (Linux-specific)
+            // TCP_KEEPIDLE: Time before first probe (60 seconds)
+            dp::i32 keepidle = 60;
+            if (::setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle)) < 0) {
+                echo::warn("setsockopt TCP_KEEPIDLE failed: ", strerror(errno));
+            } else {
+                echo::trace("TCP_KEEPIDLE set to ", keepidle, " seconds");
+            }
+
+            // TCP_KEEPINTVL: Interval between probes (10 seconds)
+            dp::i32 keepintvl = 10;
+            if (::setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl)) < 0) {
+                echo::warn("setsockopt TCP_KEEPINTVL failed: ", strerror(errno));
+            } else {
+                echo::trace("TCP_KEEPINTVL set to ", keepintvl, " seconds");
+            }
+
+            // TCP_KEEPCNT: Number of probes before giving up (3 probes)
+            dp::i32 keepcnt = 3;
+            if (::setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt)) < 0) {
+                echo::warn("setsockopt TCP_KEEPCNT failed: ", strerror(errno));
+            } else {
+                echo::trace("TCP_KEEPCNT set to ", keepcnt, " probes");
+            }
+#endif
+        }
+
       public:
         TcpStream() : fd_(-1), connected_(false), listening_(false) { echo::trace("TcpStream constructed"); }
 
@@ -44,9 +84,34 @@ namespace netpipe {
             fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                return dp::result::err(dp::Error::io_error(dp::String("socket creation failed: ") + strerror(errno)));
             }
             echo::trace("socket created fd=", fd_);
+
+            // Configure socket buffer sizes for large message RPC
+            // Default to 16MB for both send and receive buffers
+            // This improves performance for 100MB+ messages
+            constexpr dp::i32 BUFFER_SIZE = 16 * 1024 * 1024; // 16MB
+
+            dp::i32 sndbuf = BUFFER_SIZE;
+            if (::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+                echo::warn("setsockopt SO_SNDBUF failed: ", strerror(errno));
+            } else {
+                // Get actual buffer size (kernel may adjust)
+                socklen_t optlen = sizeof(sndbuf);
+                ::getsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, &optlen);
+                echo::trace("SO_SNDBUF set to ", sndbuf, " bytes (requested ", BUFFER_SIZE, ")");
+            }
+
+            dp::i32 rcvbuf = BUFFER_SIZE;
+            if (::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+                echo::warn("setsockopt SO_RCVBUF failed: ", strerror(errno));
+            } else {
+                // Get actual buffer size (kernel may adjust)
+                socklen_t optlen = sizeof(rcvbuf);
+                ::getsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &optlen);
+                echo::trace("SO_RCVBUF set to ", rcvbuf, " bytes (requested ", BUFFER_SIZE, ")");
+            }
 
             // Resolve hostname
             struct addrinfo hints = {};
@@ -59,7 +124,7 @@ namespace netpipe {
             if (ret != 0) {
                 ::close(fd_);
                 fd_ = -1;
-                echo::error("getaddrinfo failed: ", gai_strerror(ret));
+                echo::error("getaddrinfo failed for ", endpoint.to_string(), ": ", gai_strerror(ret));
                 return dp::result::err(dp::Error::io_error("getaddrinfo failed"));
             }
 
@@ -70,9 +135,21 @@ namespace netpipe {
             if (ret < 0) {
                 ::close(fd_);
                 fd_ = -1;
-                echo::error("connect failed: ", strerror(errno));
+                echo::error("connect failed to ", endpoint.to_string(), ": ", strerror(errno));
                 return dp::result::err(dp::Error::io_error("connect failed"));
             }
+
+            // Enable TCP_NODELAY to disable Nagle's algorithm for low-latency RPC
+            dp::i32 flag = 1;
+            if (::setsockopt(fd_, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                echo::warn("setsockopt TCP_NODELAY failed: ", strerror(errno));
+                // Non-fatal - continue anyway
+            } else {
+                echo::trace("TCP_NODELAY enabled on fd=", fd_);
+            }
+
+            // Configure TCP keepalive for connection health monitoring
+            configure_keepalive(fd_);
 
             connected_ = true;
             remote_endpoint_ = endpoint;
@@ -90,15 +167,42 @@ namespace netpipe {
             fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                return dp::result::err(dp::Error::io_error(dp::String("socket creation failed: ") + strerror(errno)));
             }
             echo::trace("socket created fd=", fd_);
+
+            // Configure socket buffer sizes for large message RPC
+            // Default to 16MB for both send and receive buffers
+            constexpr dp::i32 BUFFER_SIZE = 16 * 1024 * 1024; // 16MB
+
+            dp::i32 sndbuf = BUFFER_SIZE;
+            if (::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+                echo::warn("setsockopt SO_SNDBUF failed: ", strerror(errno));
+            } else {
+                socklen_t optlen = sizeof(sndbuf);
+                ::getsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, &optlen);
+                echo::trace("SO_SNDBUF set to ", sndbuf, " bytes (requested ", BUFFER_SIZE, ")");
+            }
+
+            dp::i32 rcvbuf = BUFFER_SIZE;
+            if (::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+                echo::warn("setsockopt SO_RCVBUF failed: ", strerror(errno));
+            } else {
+                socklen_t optlen = sizeof(rcvbuf);
+                ::getsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &optlen);
+                echo::trace("SO_RCVBUF set to ", rcvbuf, " bytes (requested ", BUFFER_SIZE, ")");
+            }
 
             // Set SO_REUSEADDR to avoid "address already in use" errors
             dp::i32 opt = 1;
             if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
                 echo::warn("setsockopt SO_REUSEADDR failed: ", strerror(errno));
             }
+
+            // Configure TCP keepalive for connection health monitoring
+            // Note: This applies to the listening socket, not client connections
+            // Client connections inherit some settings but we also configure them in accept()
+            configure_keepalive(fd_);
 
             // Bind to address
             struct sockaddr_in addr = {};
@@ -112,23 +216,24 @@ namespace netpipe {
                     ::close(fd_);
                     fd_ = -1;
                     echo::error("invalid address: ", endpoint.host.c_str());
-                    return dp::result::err(dp::Error::invalid_argument("invalid argument"));
+                    return dp::result::err(
+                        dp::Error::invalid_argument(dp::String("invalid IP address: ") + endpoint.host));
                 }
             }
 
             if (::bind(fd_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
                 ::close(fd_);
                 fd_ = -1;
-                echo::error("bind failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                echo::error("bind failed on ", endpoint.to_string(), ": ", strerror(errno));
+                return dp::result::err(dp::Error::io_error("bind failed"));
             }
 
             // Start listening
             if (::listen(fd_, SOMAXCONN) < 0) {
                 ::close(fd_);
                 fd_ = -1;
-                echo::error("listen failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                echo::error("listen failed on ", endpoint.to_string(), ": ", strerror(errno));
+                return dp::result::err(dp::Error::io_error("listen failed"));
             }
 
             listening_ = true;
@@ -153,9 +258,21 @@ namespace netpipe {
 
             dp::i32 client_fd = ::accept(fd_, (struct sockaddr *)&client_addr, &client_len);
             if (client_fd < 0) {
-                echo::error("accept failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("io error"));
+                echo::error("accept failed on ", local_endpoint_.to_string(), ": ", strerror(errno));
+                return dp::result::err(dp::Error::io_error("accept failed"));
             }
+
+            // Enable TCP_NODELAY on accepted client socket for low-latency RPC
+            dp::i32 flag = 1;
+            if (::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag)) < 0) {
+                echo::warn("setsockopt TCP_NODELAY failed on client_fd: ", strerror(errno));
+                // Non-fatal - continue anyway
+            } else {
+                echo::trace("TCP_NODELAY enabled on client_fd=", client_fd);
+            }
+
+            // Configure TCP keepalive for connection health monitoring
+            configure_keepalive(client_fd);
 
             // Get client address
             char client_ip[INET_ADDRSTRLEN];
@@ -208,6 +325,11 @@ namespace netpipe {
         }
 
         // Receive a message with length-prefix framing
+        // TIMEOUT HANDLING:
+        // - Timeouts are expected behavior (not errors) when using set_recv_timeout()
+        // - Connection stays alive after timeout - caller can retry
+        // - Only fatal errors (connection closed, I/O errors) mark connection as disconnected
+        // - This allows RPC to implement request timeouts without breaking the connection
         dp::Res<Message> recv() override {
             if (!connected_ || fd_ < 0) {
                 echo::trace("recv called but not connected");
@@ -221,6 +343,7 @@ namespace netpipe {
             auto res = read_exact(fd_, length_bytes.data(), 4);
             if (res.is_err()) {
                 // Only mark as disconnected for non-timeout errors
+                // Timeout is expected behavior - connection stays alive
                 if (res.error().code != dp::Error::TIMEOUT) {
                     connected_ = false;
                     echo::trace("recv length failed: ", res.error().message.c_str());
@@ -231,12 +354,31 @@ namespace netpipe {
             dp::u32 length = decode_u32_be(length_bytes.data());
             echo::trace("recv expecting ", length, " bytes");
 
-            // Read payload
-            Message msg(length);
+            // Validate message size before allocating
+            if (length > remote::MAX_MESSAGE_SIZE) {
+                echo::error("received message too large: ", length, " bytes (max: ", remote::MAX_MESSAGE_SIZE, ")");
+                connected_ = false;
+                return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
+            }
+
+            // Allocate message buffer with exception handling
+            Message msg;
+            try {
+                msg.resize(length);
+            } catch (const std::bad_alloc &e) {
+                echo::error("failed to allocate message buffer: ", length, " bytes - ", e.what());
+                connected_ = false;
+                return dp::result::err(dp::Error::io_error("memory allocation failed"));
+            } catch (const std::exception &e) {
+                echo::error("unexpected error allocating message buffer: ", e.what());
+                connected_ = false;
+                return dp::result::err(dp::Error::io_error("allocation error"));
+            }
             if (length > 0) {
                 res = read_exact(fd_, msg.data(), length);
                 if (res.is_err()) {
                     // Only mark as disconnected for non-timeout errors
+                    // Timeout during payload read keeps connection alive
                     if (res.error().code != dp::Error::TIMEOUT) {
                         connected_ = false;
                         echo::trace("recv payload failed: ", res.error().message.c_str());
@@ -262,7 +404,8 @@ namespace netpipe {
 
             if (::setsockopt(fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) < 0) {
                 echo::error("setsockopt SO_RCVTIMEO failed: ", strerror(errno));
-                return dp::result::err(dp::Error::io_error("failed to set timeout"));
+                return dp::result::err(
+                    dp::Error::io_error(dp::String("failed to set recv timeout: ") + strerror(errno)));
             }
 
             echo::trace("set recv timeout to ", timeout_ms, "ms");
