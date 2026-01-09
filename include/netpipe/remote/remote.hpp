@@ -270,10 +270,11 @@ namespace netpipe {
             dp::u32 method_id;
             std::chrono::steady_clock::time_point start_time;
             std::atomic<bool> completed;
+            std::atomic<bool> cancelled; // Flag for cooperative cancellation
 
             HandlerInfo(dp::u32 req_id, dp::u32 meth_id)
                 : request_id(req_id), method_id(meth_id), start_time(std::chrono::steady_clock::now()),
-                  completed(false) {}
+                  completed(false), cancelled(false) {}
         };
 
         /// Remote RPC - Bidirectional mode (peer-to-peer)
@@ -303,6 +304,85 @@ namespace netpipe {
             // Handler lifecycle tracking
             std::map<dp::u32, std::shared_ptr<HandlerInfo>> active_handlers_;
             mutable std::mutex handlers_mutex_;
+
+            // Handler timeout watchdog
+            std::thread watchdog_thread_;
+            dp::u32 handler_timeout_ms_;
+            std::atomic<bool> watchdog_running_;
+
+            /// Watchdog thread - monitors handler execution time and cancels timed-out handlers
+            void watchdog_loop() {
+                echo::debug("remote bidirect watchdog thread started, timeout=", handler_timeout_ms_, "ms");
+
+                while (watchdog_running_) {
+                    // Check every 1 second
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+
+                    if (!watchdog_running_) {
+                        break;
+                    }
+
+                    // Skip if timeout is disabled (0 means no timeout)
+                    if (handler_timeout_ms_ == 0) {
+                        continue;
+                    }
+
+                    auto now = std::chrono::steady_clock::now();
+                    std::vector<std::shared_ptr<HandlerInfo>> timed_out_handlers;
+
+                    // Find handlers that have exceeded timeout
+                    {
+                        std::lock_guard<std::mutex> lock(handlers_mutex_);
+                        for (auto &pair : active_handlers_) {
+                            auto &handler_info = pair.second;
+                            if (!handler_info->completed && !handler_info->cancelled) {
+                                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                    now - handler_info->start_time)
+                                                    .count();
+                                if (duration > handler_timeout_ms_) {
+                                    echo::warn("handler timeout detected id=", handler_info->request_id,
+                                               " method=", handler_info->method_id, " duration=", duration, "ms");
+                                    timed_out_handlers.push_back(handler_info);
+                                }
+                            }
+                        }
+                    }
+
+                    // Cancel timed-out handlers and send error responses
+                    for (auto &handler_info : timed_out_handlers) {
+                        // Mark as cancelled (cooperative cancellation)
+                        handler_info->cancelled = true;
+
+                        // Send timeout error response
+                        dp::String error_msg = dp::String("Handler timeout after ") +
+                                               dp::String(std::to_string(handler_timeout_ms_).c_str()) +
+                                               dp::String("ms");
+                        Message error_payload(error_msg.begin(), error_msg.end());
+                        Message remote_response = encode_remote_message_v2(
+                            handler_info->request_id, handler_info->method_id, error_payload, MessageType::Error);
+
+                        // Send error response (protect with mutex)
+                        {
+                            std::lock_guard<std::mutex> lock(send_mutex_);
+                            auto send_res = stream_.send(remote_response);
+                            if (send_res.is_err()) {
+                                echo::warn("watchdog: failed to send timeout error id=", handler_info->request_id);
+                            } else {
+                                echo::trace("watchdog: sent timeout error id=", handler_info->request_id);
+                            }
+                        }
+
+                        // Mark as completed and remove from tracking
+                        handler_info->completed = true;
+                        {
+                            std::lock_guard<std::mutex> lock(handlers_mutex_);
+                            active_handlers_.erase(handler_info->request_id);
+                        }
+                    }
+                }
+
+                echo::debug("remote bidirect watchdog thread stopped");
+            }
 
             /// Receiver thread - handles both responses (for our calls) and requests (from peer)
             void receiver_loop() {
@@ -402,6 +482,13 @@ namespace netpipe {
 
                     auto result = handler(decoded.payload);
 
+                    // Check if handler was cancelled by watchdog
+                    if (handler_info->cancelled) {
+                        echo::warn("handler was cancelled by watchdog id=", decoded.request_id);
+                        // Watchdog already sent error response, just cleanup
+                        return;
+                    }
+
                     if (result.is_err()) {
                         // Handler returned error
                         echo::warn("handler returned error: ", result.error().message.c_str());
@@ -417,6 +504,12 @@ namespace netpipe {
                         if (tracker)
                             tracker->success(result.value().size());
                     }
+                }
+
+                // Check again if cancelled (watchdog might have cancelled while we were encoding)
+                if (handler_info->cancelled) {
+                    echo::trace("handler cancelled after completion, skipping response id=", decoded.request_id);
+                    return;
                 }
 
                 // Send response (only if still running)
@@ -505,17 +598,26 @@ namespace netpipe {
             ///        Higher timeout = slower shutdown, lower CPU usage
             /// @param handler_threads Number of threads in handler pool (default: 10)
             /// @param max_handler_queue Maximum queued handlers (default: 1000)
+            /// @param handler_timeout_ms Maximum handler execution time in milliseconds (default: 30000 = 30s)
+            ///        Set to 0 to disable handler timeout
+            ///        Handlers exceeding this timeout will be cancelled and error response sent
             explicit Remote(Stream &stream, dp::usize max_concurrent = 100, bool enable_metrics = false,
                             dp::u32 recv_timeout_ms = 100, dp::usize handler_threads = 10,
-                            dp::usize max_handler_queue = 1000)
+                            dp::usize max_handler_queue = 1000, dp::u32 handler_timeout_ms = 30000)
                 : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent),
-                  enable_metrics_(enable_metrics) {
+                  enable_metrics_(enable_metrics), handler_timeout_ms_(handler_timeout_ms), watchdog_running_(true) {
                 echo::trace("Remote<Bidirect> constructed, max_concurrent=", max_concurrent,
                             " metrics=", enable_metrics, " recv_timeout=", recv_timeout_ms, "ms",
-                            " handler_threads=", handler_threads, " max_queue=", max_handler_queue);
+                            " handler_threads=", handler_threads, " max_queue=", max_handler_queue,
+                            " handler_timeout=", handler_timeout_ms, "ms");
 
                 // Create thread pool for handler execution
                 handler_pool_ = std::make_unique<ThreadPool>(handler_threads, max_handler_queue);
+
+                // Start watchdog thread if timeout is enabled
+                if (handler_timeout_ms_ > 0) {
+                    watchdog_thread_ = std::thread(&Remote::watchdog_loop, this);
+                }
 
                 // Set receive timeout to allow receiver thread to check running_ flag
                 // Configurable timeout allows tuning for different use cases
@@ -526,6 +628,7 @@ namespace netpipe {
             ~Remote() {
                 echo::trace("Remote<Bidirect> shutting down");
                 running_ = false;
+                watchdog_running_ = false;
 
                 // Wake up all pending requests
                 {
@@ -544,6 +647,11 @@ namespace netpipe {
 
                 if (receiver_thread_.joinable()) {
                     receiver_thread_.join();
+                }
+
+                // Stop watchdog thread
+                if (watchdog_thread_.joinable()) {
+                    watchdog_thread_.join();
                 }
 
                 // Shutdown thread pool and wait for all handlers to complete
