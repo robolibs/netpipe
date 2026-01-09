@@ -28,6 +28,45 @@ namespace netpipe {
             echo::debug("TcpStream created from accepted connection fd=", fd);
         }
 
+        // Helper to configure TCP keepalive for connection health monitoring
+        // Detects dead connections automatically after ~90 seconds (60 + 3*10)
+        void configure_keepalive(dp::i32 socket_fd) {
+            // Enable SO_KEEPALIVE
+            dp::i32 keepalive = 1;
+            if (::setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) < 0) {
+                echo::warn("setsockopt SO_KEEPALIVE failed: ", strerror(errno));
+                return; // Non-fatal - continue without keepalive
+            }
+            echo::trace("SO_KEEPALIVE enabled on fd=", socket_fd);
+
+#ifdef __linux__
+            // Configure keepalive parameters (Linux-specific)
+            // TCP_KEEPIDLE: Time before first probe (60 seconds)
+            dp::i32 keepidle = 60;
+            if (::setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle)) < 0) {
+                echo::warn("setsockopt TCP_KEEPIDLE failed: ", strerror(errno));
+            } else {
+                echo::trace("TCP_KEEPIDLE set to ", keepidle, " seconds");
+            }
+
+            // TCP_KEEPINTVL: Interval between probes (10 seconds)
+            dp::i32 keepintvl = 10;
+            if (::setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl)) < 0) {
+                echo::warn("setsockopt TCP_KEEPINTVL failed: ", strerror(errno));
+            } else {
+                echo::trace("TCP_KEEPINTVL set to ", keepintvl, " seconds");
+            }
+
+            // TCP_KEEPCNT: Number of probes before giving up (3 probes)
+            dp::i32 keepcnt = 3;
+            if (::setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt)) < 0) {
+                echo::warn("setsockopt TCP_KEEPCNT failed: ", strerror(errno));
+            } else {
+                echo::trace("TCP_KEEPCNT set to ", keepcnt, " probes");
+            }
+#endif
+        }
+
       public:
         TcpStream() : fd_(-1), connected_(false), listening_(false) { echo::trace("TcpStream constructed"); }
 
@@ -109,6 +148,9 @@ namespace netpipe {
                 echo::trace("TCP_NODELAY enabled on fd=", fd_);
             }
 
+            // Configure TCP keepalive for connection health monitoring
+            configure_keepalive(fd_);
+
             connected_ = true;
             remote_endpoint_ = endpoint;
             echo::debug("connected to ", endpoint.to_string());
@@ -156,6 +198,11 @@ namespace netpipe {
             if (::setsockopt(fd_, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0) {
                 echo::warn("setsockopt SO_REUSEADDR failed: ", strerror(errno));
             }
+
+            // Configure TCP keepalive for connection health monitoring
+            // Note: This applies to the listening socket, not client connections
+            // Client connections inherit some settings but we also configure them in accept()
+            configure_keepalive(fd_);
 
             // Bind to address
             struct sockaddr_in addr = {};
@@ -223,6 +270,9 @@ namespace netpipe {
             } else {
                 echo::trace("TCP_NODELAY enabled on client_fd=", client_fd);
             }
+
+            // Configure TCP keepalive for connection health monitoring
+            configure_keepalive(client_fd);
 
             // Get client address
             char client_ip[INET_ADDRSTRLEN];
