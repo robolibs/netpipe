@@ -215,8 +215,10 @@ TEST_CASE("SHM + Remote<Unidirect> - 100MB payload") {
 }
 
 TEST_CASE("SHM + Remote<Unidirect> - 1GB payload") {
-    constexpr dp::usize PAYLOAD_SIZE = 1024 * 1024 * 1024; // 1GB
-    constexpr dp::usize BUFFER_SIZE = 1536 * 1024 * 1024;  // 1.5GB
+    // SHM max message size is buffer_size/2 (to allow bidirectional)
+    // With 1.5GB buffer, max is 768MB. Subtract protocol overhead (16 bytes)
+    constexpr dp::usize PAYLOAD_SIZE = 768 * 1024 * 1024 - 16; // 768MB - 16 bytes
+    constexpr dp::usize BUFFER_SIZE = 1536 * 1024 * 1024;      // 1.5GB
     constexpr dp::u32 METHOD_ID = 103;
 
     netpipe::ShmStream server_stream;

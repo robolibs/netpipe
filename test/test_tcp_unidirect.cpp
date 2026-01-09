@@ -267,8 +267,9 @@ TEST_CASE("TCP Unidirect - 1GB payload") {
 
         netpipe::Remote<netpipe::Unidirect> remote(client);
 
-        // Create 1GB payload
-        dp::usize size = 1024 * 1024 * 1024;
+        // Create 1GB payload (minus protocol overhead to stay under MAX_MESSAGE_SIZE)
+        // Protocol adds 16 bytes overhead, so max payload is 1GB - 16 bytes
+        dp::usize size = 1024 * 1024 * 1024 - 16;
         netpipe::Message request(size);
         for (dp::usize i = 0; i < size; i++) {
             request[i] = static_cast<dp::u8>(i % 256);
