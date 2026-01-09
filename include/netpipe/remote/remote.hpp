@@ -507,11 +507,16 @@ namespace netpipe {
 
                     auto result = handler(decoded.payload);
 
-                    // Check if handler was cancelled by watchdog
+                    // Check if handler was cancelled (by peer cancel or watchdog)
                     if (handler_info->cancelled) {
-                        echo::warn("handler was cancelled by watchdog id=", decoded.request_id);
-                        // Watchdog already sent error response, just cleanup
-                        active_incoming_count_.fetch_sub(1); // Decrement counter
+                        echo::warn("handler was cancelled id=", decoded.request_id);
+                        // Canceller already sent error response, just cleanup
+                        handler_info->completed = true;
+                        {
+                            std::lock_guard<std::mutex> lock(handlers_mutex_);
+                            active_handlers_.erase(decoded.request_id);
+                        }
+                        active_incoming_count_.fetch_sub(1);
                         return;
                     }
 
@@ -532,35 +537,54 @@ namespace netpipe {
                     }
                 }
 
-                // Check again if cancelled (watchdog might have cancelled while we were encoding)
-                if (handler_info->cancelled) {
-                    echo::trace("handler cancelled after completion, skipping response id=", decoded.request_id);
-                    active_incoming_count_.fetch_sub(1); // Decrement counter
-                    return;
-                }
-
                 // Send response (only if still running)
                 if (!running_) {
                     echo::trace("remote bidirect shutting down, skipping response");
-                    active_incoming_count_.fetch_sub(1); // Decrement counter
+                    handler_info->completed = true;
+                    {
+                        std::lock_guard<std::mutex> lock(handlers_mutex_);
+                        active_handlers_.erase(decoded.request_id);
+                    }
+                    active_incoming_count_.fetch_sub(1);
                     return;
                 }
 
-                // Protect stream send with mutex
+                // Atomically check cancelled and send response (using send_mutex)
+                // This prevents race with handle_cancel sending duplicate response
                 {
                     std::lock_guard<std::mutex> lock(send_mutex_);
+
+                    // Check if cancelled while we were encoding response
+                    if (handler_info->cancelled) {
+                        echo::trace("handler cancelled, skipping response id=", decoded.request_id);
+                        // Canceller already sent error response, just cleanup
+                        handler_info->completed = true;
+                        {
+                            std::lock_guard<std::mutex> lock(handlers_mutex_);
+                            active_handlers_.erase(decoded.request_id);
+                        }
+                        active_incoming_count_.fetch_sub(1);
+                        return;
+                    }
+
+                    // Mark completed before sending to prevent cancel from sending
+                    handler_info->completed = true;
+
                     auto send_res = stream_.send(remote_response);
                     if (send_res.is_err()) {
                         echo::trace("remote bidirect send response failed: ", send_res.error().message.c_str());
-                        active_incoming_count_.fetch_sub(1); // Decrement counter
-                        return;                              // Exit if we can't send responses
+                        {
+                            std::lock_guard<std::mutex> lock(handlers_mutex_);
+                            active_handlers_.erase(decoded.request_id);
+                        }
+                        active_incoming_count_.fetch_sub(1);
+                        return;
                     }
                 }
 
                 echo::trace("remote bidirect sent response id=", decoded.request_id);
 
-                // Mark handler as completed and remove from tracking
-                handler_info->completed = true;
+                // Remove from tracking (completed already set inside send_mutex)
                 {
                     std::lock_guard<std::mutex> lock(handlers_mutex_);
                     active_handlers_.erase(decoded.request_id);
@@ -617,7 +641,68 @@ namespace netpipe {
             void handle_cancel(const DecodedMessageV2 &decoded) {
                 dp::u32 request_id = decoded.request_id;
                 echo::trace("remote bidirect received cancel request id=", request_id);
-                echo::debug("cancel request received for id=", request_id, " (handler cancellation not implemented)");
+
+                // Find the active handler and mark it as cancelled
+                std::shared_ptr<HandlerInfo> handler_info;
+                {
+                    std::lock_guard<std::mutex> lock(handlers_mutex_);
+                    auto it = active_handlers_.find(request_id);
+                    if (it != active_handlers_.end()) {
+                        handler_info = it->second;
+                    }
+                }
+
+                if (!handler_info) {
+                    echo::trace("cancel: handler not found for request_id=", request_id,
+                                " (may have already completed)");
+                    return;
+                }
+
+                // Check if already cancelled (without lock - early exit)
+                if (handler_info->cancelled) {
+                    echo::trace("cancel: handler already cancelled id=", request_id);
+                    return;
+                }
+
+                // Prepare error response
+                dp::String error_msg = "Request cancelled by peer";
+                Message error_payload(error_msg.begin(), error_msg.end());
+                Message remote_response =
+                    encode_remote_message_v2(request_id, handler_info->method_id, error_payload, MessageType::Error);
+
+                // Atomically check completed and send cancellation response (using send_mutex)
+                // This coordinates with handle_request to prevent duplicate responses
+                {
+                    std::lock_guard<std::mutex> lock(send_mutex_);
+
+                    // Check if already completed (response already sent by handle_request)
+                    if (handler_info->completed) {
+                        echo::trace("cancel: handler already completed id=", request_id);
+                        return;
+                    }
+
+                    // Check if already cancelled (by watchdog or another cancel)
+                    if (handler_info->cancelled) {
+                        echo::trace("cancel: handler already cancelled id=", request_id);
+                        return;
+                    }
+
+                    // Mark as cancelled (cooperative cancellation - handler should check this flag)
+                    handler_info->cancelled = true;
+                    echo::debug("cancel: marked handler as cancelled id=", request_id,
+                                " method=", handler_info->method_id);
+
+                    auto send_res = stream_.send(remote_response);
+                    if (send_res.is_err()) {
+                        echo::warn("cancel: failed to send cancellation response id=", request_id);
+                    } else {
+                        echo::trace("cancel: sent cancellation response id=", request_id);
+                    }
+                }
+
+                // Note: Don't do cleanup here (mark completed, remove from tracking, decrement counter).
+                // Let handle_request do cleanup when it notices the cancelled flag.
+                // This avoids double-decrementing active_incoming_count_.
             }
 
           public:
