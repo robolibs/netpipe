@@ -1,15 +1,110 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
 #include <netpipe/remote/async.hpp>
 #include <netpipe/remote/metrics.hpp>
 #include <netpipe/remote/protocol.hpp>
 #include <netpipe/remote/registry.hpp>
 #include <netpipe/stream.hpp>
+#include <queue>
 #include <thread>
+#include <vector>
 
 namespace netpipe {
     namespace remote {
+
+        /// Simple thread pool for handler execution
+        /// Fixed-size pool with task queue
+        class ThreadPool {
+          private:
+            std::vector<std::thread> workers_;
+            std::queue<std::function<void()>> tasks_;
+            mutable std::mutex queue_mutex_;
+            std::condition_variable condition_;
+            std::atomic<bool> stop_;
+            std::atomic<dp::usize> active_tasks_;
+            dp::usize max_queue_size_;
+
+          public:
+            explicit ThreadPool(dp::usize num_threads = 10, dp::usize max_queue_size = 1000)
+                : stop_(false), active_tasks_(0), max_queue_size_(max_queue_size) {
+                echo::trace("ThreadPool created with ", num_threads, " threads, max_queue=", max_queue_size);
+
+                for (dp::usize i = 0; i < num_threads; ++i) {
+                    workers_.emplace_back([this] {
+                        while (true) {
+                            std::function<void()> task;
+                            {
+                                std::unique_lock<std::mutex> lock(queue_mutex_);
+                                condition_.wait(lock, [this] { return stop_ || !tasks_.empty(); });
+
+                                if (stop_ && tasks_.empty()) {
+                                    return;
+                                }
+
+                                if (!tasks_.empty()) {
+                                    task = std::move(tasks_.front());
+                                    tasks_.pop();
+                                }
+                            }
+
+                            if (task) {
+                                active_tasks_++;
+                                task();
+                                active_tasks_--;
+                            }
+                        }
+                    });
+                }
+            }
+
+            ~ThreadPool() { shutdown(); }
+
+            /// Submit a task to the pool
+            /// Returns false if queue is full
+            bool submit(std::function<void()> task) {
+                {
+                    std::unique_lock<std::mutex> lock(queue_mutex_);
+                    if (tasks_.size() >= max_queue_size_) {
+                        echo::warn("ThreadPool queue full (", tasks_.size(), "/", max_queue_size_, ")");
+                        return false;
+                    }
+                    tasks_.push(std::move(task));
+                }
+                condition_.notify_one();
+                return true;
+            }
+
+            /// Get number of active tasks
+            dp::usize active_count() const { return active_tasks_.load(); }
+
+            /// Get number of queued tasks
+            dp::usize queued_count() const {
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                return tasks_.size();
+            }
+
+            /// Shutdown the pool and wait for all tasks to complete
+            void shutdown() {
+                if (stop_) {
+                    return;
+                }
+
+                echo::trace("ThreadPool shutting down, active=", active_tasks_.load(), " queued=", tasks_.size());
+                stop_ = true;
+                condition_.notify_all();
+
+                for (auto &worker : workers_) {
+                    if (worker.joinable()) {
+                        worker.join();
+                    }
+                }
+                echo::trace("ThreadPool shutdown complete");
+            }
+        };
 
         /// Remote mode tags
         struct Unidirect {};
@@ -192,6 +287,9 @@ namespace netpipe {
             RemoteMetrics server_metrics_; // Metrics for incoming requests
             bool enable_metrics_;
 
+            // Thread pool for handler execution
+            std::unique_ptr<ThreadPool> handler_pool_;
+
             /// Receiver thread - handles both responses (for our calls) and requests (from peer)
             void receiver_loop() {
                 echo::debug("remote bidirect receiver thread started");
@@ -222,8 +320,19 @@ namespace netpipe {
 
                     // Determine message type
                     if (decoded.type == MessageType::Request) {
-                        // Incoming request - handle it in a separate thread to avoid blocking receiver
-                        std::thread([this, decoded]() { handle_request(decoded); }).detach();
+                        // Incoming request - submit to thread pool to avoid blocking receiver
+                        bool submitted = handler_pool_->submit([this, decoded]() { handle_request(decoded); });
+                        if (!submitted) {
+                            echo::warn("handler pool queue full, rejecting request id=", decoded.request_id);
+                            // Send error response - handler pool is overloaded
+                            Message error_payload;
+                            dp::String error_msg = "Handler pool overloaded";
+                            error_payload.assign(error_msg.begin(), error_msg.end());
+                            Message remote_response = encode_remote_message_v2(decoded.request_id, decoded.method_id,
+                                                                               error_payload, MessageType::Error);
+                            std::lock_guard<std::mutex> lock(send_mutex_);
+                            stream_.send(remote_response);
+                        }
                     } else if (decoded.type == MessageType::Cancel) {
                         // Cancellation request - handle it
                         handle_cancel(decoded);
@@ -359,12 +468,20 @@ namespace netpipe {
             /// @param recv_timeout_ms Receiver thread timeout in milliseconds (default: 100)
             ///        Lower timeout = faster shutdown, higher CPU usage
             ///        Higher timeout = slower shutdown, lower CPU usage
+            /// @param handler_threads Number of threads in handler pool (default: 10)
+            /// @param max_handler_queue Maximum queued handlers (default: 1000)
             explicit Remote(Stream &stream, dp::usize max_concurrent = 100, bool enable_metrics = false,
-                            dp::u32 recv_timeout_ms = 100)
+                            dp::u32 recv_timeout_ms = 100, dp::usize handler_threads = 10,
+                            dp::usize max_handler_queue = 1000)
                 : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent),
                   enable_metrics_(enable_metrics) {
                 echo::trace("Remote<Bidirect> constructed, max_concurrent=", max_concurrent,
-                            " metrics=", enable_metrics, " recv_timeout=", recv_timeout_ms, "ms");
+                            " metrics=", enable_metrics, " recv_timeout=", recv_timeout_ms, "ms",
+                            " handler_threads=", handler_threads, " max_queue=", max_handler_queue);
+
+                // Create thread pool for handler execution
+                handler_pool_ = std::make_unique<ThreadPool>(handler_threads, max_handler_queue);
+
                 // Set receive timeout to allow receiver thread to check running_ flag
                 // Configurable timeout allows tuning for different use cases
                 stream_.set_recv_timeout(recv_timeout_ms);
@@ -393,6 +510,12 @@ namespace netpipe {
                 if (receiver_thread_.joinable()) {
                     receiver_thread_.join();
                 }
+
+                // Shutdown thread pool and wait for all handlers to complete
+                if (handler_pool_) {
+                    handler_pool_->shutdown();
+                }
+
                 echo::trace("Remote<Bidirect> destroyed");
             }
 
