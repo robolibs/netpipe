@@ -149,10 +149,22 @@ namespace netpipe {
         /// - Adds boundary marker for message integrity validation
         /// - Marks stream as corrupted if partial send occurs
         /// - If buffer is full, returns error without corrupting the stream
+        /// SIZE VALIDATION:
+        /// - Validates message size before sending
+        /// - Max message size is buffer_size / 2 (to allow bidirectional traffic)
         dp::Res<void> send(const Message &msg) override {
             if (!connected_) {
                 echo::trace("send called but not connected");
                 return dp::result::err(dp::Error::not_found("not connected"));
+            }
+
+            // Validate message size
+            // Max size is buffer_size / 2 to allow bidirectional communication
+            // (both directions can have messages in flight simultaneously)
+            dp::usize max_message_size = buffer_size_ / 2;
+            if (msg.size() > max_message_size) {
+                echo::error("message too large: ", msg.size(), " bytes (max ", max_message_size, " bytes)");
+                return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
             }
 
             echo::trace("shm send ", msg.size(), " bytes");
@@ -312,6 +324,24 @@ namespace netpipe {
 
             dp::u32 length = decode_u32_be(length_bytes.data());
             echo::trace("recv expecting ", length, " bytes");
+
+            // Validate message size before allocating
+            // Max size is buffer_size / 2 to allow bidirectional communication
+            dp::usize max_message_size = buffer_size_ / 2;
+            if (length > max_message_size) {
+                echo::error("received invalid message length: ", length, " bytes (max ", max_message_size, " bytes)");
+                // Stream is corrupted - close connection
+                connected_ = false;
+                return dp::result::err(dp::Error::invalid_argument("received message exceeds maximum size"));
+            }
+
+            // Additional sanity check: length should be reasonable
+            // Reject obviously corrupted lengths (e.g., > 2GB)
+            if (length > 2147483648u) { // 2GB
+                echo::error("received unreasonably large message length: ", length, " bytes");
+                connected_ = false;
+                return dp::result::err(dp::Error::invalid_argument("received message length is unreasonable"));
+            }
 
             // Read payload with polling and exponential backoff
             Message msg(length);
