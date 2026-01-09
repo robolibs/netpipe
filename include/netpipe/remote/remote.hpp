@@ -293,9 +293,11 @@ namespace netpipe {
 
             std::thread receiver_thread_;
             std::atomic<bool> running_;
-            dp::usize max_concurrent_requests_;
-            RemoteMetrics client_metrics_; // Metrics for outgoing calls
-            RemoteMetrics server_metrics_; // Metrics for incoming requests
+            dp::usize max_concurrent_requests_;            // Limit for outgoing requests
+            dp::usize max_incoming_requests_;              // Limit for incoming requests
+            std::atomic<dp::usize> active_incoming_count_; // Count of active incoming handlers
+            RemoteMetrics client_metrics_;                 // Metrics for outgoing calls
+            RemoteMetrics server_metrics_;                 // Metrics for incoming requests
             bool enable_metrics_;
 
             // Thread pool for handler execution
@@ -443,6 +445,29 @@ namespace netpipe {
             void handle_request(const DecodedMessageV2 &decoded) {
                 echo::trace("remote bidirect handling request id=", decoded.request_id, " method=", decoded.method_id);
 
+                // Check incoming request limit
+                dp::usize current_count = active_incoming_count_.fetch_add(1);
+                if (current_count >= max_incoming_requests_) {
+                    active_incoming_count_.fetch_sub(1); // Revert increment
+                    echo::warn("incoming request limit reached: ", max_incoming_requests_,
+                               " rejecting request id=", decoded.request_id);
+
+                    // Send error response immediately
+                    dp::String error_msg = dp::String("Server overloaded: max incoming requests (") +
+                                           dp::String(std::to_string(max_incoming_requests_).c_str()) +
+                                           dp::String(") reached");
+                    Message error_payload(error_msg.begin(), error_msg.end());
+                    Message remote_response = encode_remote_message_v2(decoded.request_id, decoded.method_id,
+                                                                       error_payload, MessageType::Error);
+
+                    std::lock_guard<std::mutex> lock(send_mutex_);
+                    auto send_res = stream_.send(remote_response);
+                    if (send_res.is_err()) {
+                        echo::warn("failed to send overload error response id=", decoded.request_id);
+                    }
+                    return;
+                }
+
                 // Track handler lifecycle
                 auto handler_info = std::make_shared<HandlerInfo>(decoded.request_id, decoded.method_id);
                 {
@@ -486,6 +511,7 @@ namespace netpipe {
                     if (handler_info->cancelled) {
                         echo::warn("handler was cancelled by watchdog id=", decoded.request_id);
                         // Watchdog already sent error response, just cleanup
+                        active_incoming_count_.fetch_sub(1); // Decrement counter
                         return;
                     }
 
@@ -509,12 +535,14 @@ namespace netpipe {
                 // Check again if cancelled (watchdog might have cancelled while we were encoding)
                 if (handler_info->cancelled) {
                     echo::trace("handler cancelled after completion, skipping response id=", decoded.request_id);
+                    active_incoming_count_.fetch_sub(1); // Decrement counter
                     return;
                 }
 
                 // Send response (only if still running)
                 if (!running_) {
                     echo::trace("remote bidirect shutting down, skipping response");
+                    active_incoming_count_.fetch_sub(1); // Decrement counter
                     return;
                 }
 
@@ -524,7 +552,8 @@ namespace netpipe {
                     auto send_res = stream_.send(remote_response);
                     if (send_res.is_err()) {
                         echo::trace("remote bidirect send response failed: ", send_res.error().message.c_str());
-                        return; // Exit if we can't send responses
+                        active_incoming_count_.fetch_sub(1); // Decrement counter
+                        return;                              // Exit if we can't send responses
                     }
                 }
 
@@ -543,6 +572,9 @@ namespace netpipe {
                                     .count();
                 echo::trace("handler completed id=", decoded.request_id, " method=", decoded.method_id,
                             " duration=", duration, "ms");
+
+                // Decrement incoming request counter
+                active_incoming_count_.fetch_sub(1);
             }
 
             /// Handle response to our outgoing call
@@ -591,7 +623,7 @@ namespace netpipe {
           public:
             /// Constructor for bidirectional RPC
             /// @param stream The underlying stream for communication
-            /// @param max_concurrent Maximum number of concurrent pending requests (default: 100)
+            /// @param max_concurrent Maximum number of concurrent outgoing requests (default: 100)
             /// @param enable_metrics Enable metrics collection (default: false)
             /// @param recv_timeout_ms Receiver thread timeout in milliseconds (default: 100)
             ///        Lower timeout = faster shutdown, higher CPU usage
@@ -601,15 +633,19 @@ namespace netpipe {
             /// @param handler_timeout_ms Maximum handler execution time in milliseconds (default: 30000 = 30s)
             ///        Set to 0 to disable handler timeout
             ///        Handlers exceeding this timeout will be cancelled and error response sent
+            /// @param max_incoming Maximum number of concurrent incoming requests (default: 100)
+            ///        Requests exceeding this limit will be rejected with error response
             explicit Remote(Stream &stream, dp::usize max_concurrent = 100, bool enable_metrics = false,
                             dp::u32 recv_timeout_ms = 100, dp::usize handler_threads = 10,
-                            dp::usize max_handler_queue = 1000, dp::u32 handler_timeout_ms = 30000)
+                            dp::usize max_handler_queue = 1000, dp::u32 handler_timeout_ms = 30000,
+                            dp::usize max_incoming = 100)
                 : stream_(stream), next_request_id_(0), running_(true), max_concurrent_requests_(max_concurrent),
-                  enable_metrics_(enable_metrics), handler_timeout_ms_(handler_timeout_ms), watchdog_running_(true) {
+                  max_incoming_requests_(max_incoming), active_incoming_count_(0), enable_metrics_(enable_metrics),
+                  handler_timeout_ms_(handler_timeout_ms), watchdog_running_(true) {
                 echo::trace("Remote<Bidirect> constructed, max_concurrent=", max_concurrent,
-                            " metrics=", enable_metrics, " recv_timeout=", recv_timeout_ms, "ms",
-                            " handler_threads=", handler_threads, " max_queue=", max_handler_queue,
-                            " handler_timeout=", handler_timeout_ms, "ms");
+                            " max_incoming=", max_incoming, " metrics=", enable_metrics,
+                            " recv_timeout=", recv_timeout_ms, "ms", " handler_threads=", handler_threads,
+                            " max_queue=", max_handler_queue, " handler_timeout=", handler_timeout_ms, "ms");
 
                 // Create thread pool for handler execution
                 handler_pool_ = std::make_unique<ThreadPool>(handler_threads, max_handler_queue);
@@ -769,6 +805,9 @@ namespace netpipe {
                 std::lock_guard<std::mutex> lock(handlers_mutex_);
                 return active_handlers_.size();
             }
+
+            /// Get number of active incoming requests (being processed)
+            dp::usize active_incoming_count() const { return active_incoming_count_.load(); }
 
             /// Get number of active tasks in thread pool
             dp::usize active_pool_tasks() const { return handler_pool_ ? handler_pool_->active_count() : 0; }
