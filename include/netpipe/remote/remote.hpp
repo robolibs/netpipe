@@ -264,9 +264,19 @@ namespace netpipe {
             dp::usize method_count() const { return registry_.method_count(); }
         };
 
+        /// Handler execution info for lifecycle tracking
+        struct HandlerInfo {
+            dp::u32 request_id;
+            dp::u32 method_id;
+            std::chrono::steady_clock::time_point start_time;
+            std::atomic<bool> completed;
+
+            HandlerInfo(dp::u32 req_id, dp::u32 meth_id)
+                : request_id(req_id), method_id(meth_id), start_time(std::chrono::steady_clock::now()),
+                  completed(false) {}
+        };
+
         /// Remote RPC - Bidirectional mode (peer-to-peer)
-        /// Both sides can register handlers AND make calls
-        /// Supports concurrent requests
         template <> class Remote<Bidirect> {
           private:
             Stream &stream_;
@@ -289,6 +299,10 @@ namespace netpipe {
 
             // Thread pool for handler execution
             std::unique_ptr<ThreadPool> handler_pool_;
+
+            // Handler lifecycle tracking
+            std::map<dp::u32, std::shared_ptr<HandlerInfo>> active_handlers_;
+            mutable std::mutex handlers_mutex_;
 
             /// Receiver thread - handles both responses (for our calls) and requests (from peer)
             void receiver_loop() {
@@ -348,6 +362,13 @@ namespace netpipe {
             /// Handle incoming request from peer
             void handle_request(const DecodedMessageV2 &decoded) {
                 echo::trace("remote bidirect handling request id=", decoded.request_id, " method=", decoded.method_id);
+
+                // Track handler lifecycle
+                auto handler_info = std::make_shared<HandlerInfo>(decoded.request_id, decoded.method_id);
+                {
+                    std::lock_guard<std::mutex> lock(handlers_mutex_);
+                    active_handlers_[decoded.request_id] = handler_info;
+                }
 
                 // Start metrics tracking if enabled
                 std::unique_ptr<MetricsTracker> tracker;
@@ -415,6 +436,20 @@ namespace netpipe {
                 }
 
                 echo::trace("remote bidirect sent response id=", decoded.request_id);
+
+                // Mark handler as completed and remove from tracking
+                handler_info->completed = true;
+                {
+                    std::lock_guard<std::mutex> lock(handlers_mutex_);
+                    active_handlers_.erase(decoded.request_id);
+                }
+
+                // Log handler execution time
+                auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() -
+                                                                                      handler_info->start_time)
+                                    .count();
+                echo::trace("handler completed id=", decoded.request_id, " method=", decoded.method_id,
+                            " duration=", duration, "ms");
             }
 
             /// Handle response to our outgoing call
@@ -620,6 +655,18 @@ namespace netpipe {
                 std::lock_guard<std::mutex> lock(pending_mutex_);
                 return pending_requests_.size();
             }
+
+            /// Get number of active handlers (incoming requests being processed)
+            dp::usize active_handler_count() const {
+                std::lock_guard<std::mutex> lock(handlers_mutex_);
+                return active_handlers_.size();
+            }
+
+            /// Get number of active tasks in thread pool
+            dp::usize active_pool_tasks() const { return handler_pool_ ? handler_pool_->active_count() : 0; }
+
+            /// Get number of queued tasks in thread pool
+            dp::usize queued_pool_tasks() const { return handler_pool_ ? handler_pool_->queued_count() : 0; }
 
             /// Get number of registered methods
             dp::usize method_count() const { return registry_.method_count(); }
