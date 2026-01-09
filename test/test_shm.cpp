@@ -166,7 +166,7 @@ TEST_CASE("ShmStream - Message exchange") {
 }
 
 TEST_CASE("ShmStream - Multiple messages") {
-    SUBCASE("Send and receive single message sequence") {
+    SUBCASE("Send and receive message sequence") {
         netpipe::ShmStream listener;
         netpipe::ShmEndpoint endpoint{"netpipe_test_shm_5", 16384};
 
@@ -174,18 +174,23 @@ TEST_CASE("ShmStream - Multiple messages") {
         REQUIRE(listen_res.is_ok());
 
         std::unique_ptr<netpipe::Stream> server_conn;
+        std::atomic<int> msgs_received{0};
 
         std::thread server_thread([&]() {
             auto accept_res = listener.accept();
             REQUIRE(accept_res.is_ok());
             server_conn = std::move(accept_res.value());
 
-            // Send multiple messages
+            // Send multiple messages - wait for client to receive each one
+            // SHM only holds one message at a time
             for (int i = 0; i < 3; i++) {
                 netpipe::Message msg = {static_cast<dp::u8>(i), static_cast<dp::u8>(i + 1)};
                 auto send_res = server_conn->send(msg);
                 CHECK(send_res.is_ok());
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                // Wait for client to receive before sending next
+                while (msgs_received.load() <= i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
             }
         });
 
@@ -195,18 +200,18 @@ TEST_CASE("ShmStream - Multiple messages") {
         auto connect_res = client.connect_shm(endpoint);
         REQUIRE(connect_res.is_ok());
 
-        server_thread.join();
-
-        // Receive messages
+        // Receive messages - signal after each receive
         for (int i = 0; i < 3; i++) {
             auto recv_res = client.recv();
-            if (recv_res.is_ok()) {
-                auto received = std::move(recv_res.value());
-                CHECK(received.size() == 2);
-                CHECK(received[0] == static_cast<dp::u8>(i));
-                CHECK(received[1] == static_cast<dp::u8>(i + 1));
-            }
+            REQUIRE(recv_res.is_ok());
+            auto received = std::move(recv_res.value());
+            CHECK(received.size() == 2);
+            CHECK(received[0] == static_cast<dp::u8>(i));
+            CHECK(received[1] == static_cast<dp::u8>(i + 1));
+            msgs_received++;
         }
+
+        server_thread.join();
 
         client.close();
         server_conn->close();

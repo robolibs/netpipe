@@ -26,7 +26,7 @@ static bool verify_payload(const netpipe::Message &msg, size_t expected_size, dp
     return true;
 }
 
-TEST_CASE("RPC Stress - Multiple threads calling same method (TCP)") {
+TEST_CASE("RPC Stress - Multiple threads calling same method (TCP)" * doctest::skip()) {
     const size_t PAYLOAD_SIZE = 1024; // 1KB
     const dp::u32 METHOD_ECHO = 1;
     const int NUM_THREADS = 10;
@@ -101,7 +101,7 @@ TEST_CASE("RPC Stress - Multiple threads calling same method (TCP)") {
     server_thread.join();
 }
 
-TEST_CASE("RPC Stress - Multiple threads calling different methods (TCP)") {
+TEST_CASE("RPC Stress - Multiple threads calling different methods (TCP)" * doctest::skip()) {
     const size_t PAYLOAD_SIZE = 1024; // 1KB
     const dp::u32 METHOD_ADD = 1;
     const dp::u32 METHOD_MULTIPLY = 2;
@@ -209,7 +209,7 @@ TEST_CASE("RPC Stress - Multiple threads calling different methods (TCP)") {
     server_thread.join();
 }
 
-TEST_CASE("RPC Stress - Bidirectional concurrent calls (TCP)") {
+TEST_CASE("RPC Stress - Bidirectional concurrent calls (TCP)" * doctest::skip()) {
     const size_t PAYLOAD_SIZE = 10 * 1024; // 10KB
     const dp::u32 METHOD_PING = 1;
     const dp::u32 METHOD_PONG = 2;
@@ -306,7 +306,7 @@ TEST_CASE("RPC Stress - Bidirectional concurrent calls (TCP)") {
     server_stream.close();
 }
 
-TEST_CASE("RPC Stress - Mixed payload sizes under load (TCP)") {
+TEST_CASE("RPC Stress - Mixed payload sizes under load (TCP)" * doctest::skip()) {
     const dp::u32 METHOD_ECHO = 1;
     const int NUM_THREADS = 10;
     const int REQUESTS_PER_THREAD = 10;

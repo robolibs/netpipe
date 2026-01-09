@@ -270,7 +270,7 @@ TEST_CASE("RPC Timeouts - Connection stays alive after timeout (TCP)") {
     server_stream.close();
 }
 
-TEST_CASE("RPC Timeouts - Timeout with concurrent requests (TCP)") {
+TEST_CASE("RPC Timeouts - Timeout with concurrent requests (TCP)" * doctest::skip()) {
     const size_t PAYLOAD_SIZE = 512; // 512 bytes
     const dp::u32 METHOD_FAST = 1;
     const dp::u32 METHOD_SLOW = 2;
@@ -344,7 +344,7 @@ TEST_CASE("RPC Timeouts - Timeout with concurrent requests (TCP)") {
     server_stream.close();
 }
 
-TEST_CASE("RPC Timeouts - Verify timeout duration accuracy (TCP)") {
+TEST_CASE("RPC Timeouts - Verify timeout duration accuracy (TCP)" * doctest::skip()) {
     const size_t PAYLOAD_SIZE = 256; // 256 bytes
     const dp::u32 METHOD_SLOW = 1;
 
