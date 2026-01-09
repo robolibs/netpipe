@@ -48,6 +48,31 @@ namespace netpipe {
             }
             echo::trace("socket created fd=", fd_);
 
+            // Configure socket buffer sizes for large message RPC
+            // Default to 16MB for both send and receive buffers
+            // This improves performance for 100MB+ messages
+            constexpr dp::i32 BUFFER_SIZE = 16 * 1024 * 1024; // 16MB
+
+            dp::i32 sndbuf = BUFFER_SIZE;
+            if (::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+                echo::warn("setsockopt SO_SNDBUF failed: ", strerror(errno));
+            } else {
+                // Get actual buffer size (kernel may adjust)
+                socklen_t optlen = sizeof(sndbuf);
+                ::getsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, &optlen);
+                echo::trace("SO_SNDBUF set to ", sndbuf, " bytes (requested ", BUFFER_SIZE, ")");
+            }
+
+            dp::i32 rcvbuf = BUFFER_SIZE;
+            if (::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+                echo::warn("setsockopt SO_RCVBUF failed: ", strerror(errno));
+            } else {
+                // Get actual buffer size (kernel may adjust)
+                socklen_t optlen = sizeof(rcvbuf);
+                ::getsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &optlen);
+                echo::trace("SO_RCVBUF set to ", rcvbuf, " bytes (requested ", BUFFER_SIZE, ")");
+            }
+
             // Resolve hostname
             struct addrinfo hints = {};
             hints.ai_family = AF_INET;
@@ -102,6 +127,28 @@ namespace netpipe {
                 return dp::result::err(dp::Error::io_error("io error"));
             }
             echo::trace("socket created fd=", fd_);
+
+            // Configure socket buffer sizes for large message RPC
+            // Default to 16MB for both send and receive buffers
+            constexpr dp::i32 BUFFER_SIZE = 16 * 1024 * 1024; // 16MB
+
+            dp::i32 sndbuf = BUFFER_SIZE;
+            if (::setsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, sizeof(sndbuf)) < 0) {
+                echo::warn("setsockopt SO_SNDBUF failed: ", strerror(errno));
+            } else {
+                socklen_t optlen = sizeof(sndbuf);
+                ::getsockopt(fd_, SOL_SOCKET, SO_SNDBUF, &sndbuf, &optlen);
+                echo::trace("SO_SNDBUF set to ", sndbuf, " bytes (requested ", BUFFER_SIZE, ")");
+            }
+
+            dp::i32 rcvbuf = BUFFER_SIZE;
+            if (::setsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+                echo::warn("setsockopt SO_RCVBUF failed: ", strerror(errno));
+            } else {
+                socklen_t optlen = sizeof(rcvbuf);
+                ::getsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &optlen);
+                echo::trace("SO_RCVBUF set to ", rcvbuf, " bytes (requested ", BUFFER_SIZE, ")");
+            }
 
             // Set SO_REUSEADDR to avoid "address already in use" errors
             dp::i32 opt = 1;
