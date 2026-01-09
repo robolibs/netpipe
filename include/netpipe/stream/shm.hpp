@@ -23,6 +23,10 @@ namespace netpipe {
         dp::u32 recv_timeout_ms_;
         static constexpr dp::u32 POLL_INTERVAL_US = 100;
 
+        // Message boundary marker for atomicity validation
+        // Using a magic value that's unlikely to appear naturally
+        static constexpr dp::u32 MESSAGE_BOUNDARY_MARKER = 0xDEADBEEF;
+
       public:
         ShmStream() : connected_(false), is_server_(false), recv_timeout_ms_(0) {
             echo::trace("ShmStream constructed");
@@ -140,8 +144,11 @@ namespace netpipe {
         }
 
         /// Send message with length-prefix framing
-        /// ATOMICITY: Checks space before sending to avoid partial messages
-        /// If buffer is full, returns error without corrupting the stream
+        /// ATOMICITY:
+        /// - Checks space before sending to avoid partial messages
+        /// - Adds boundary marker for message integrity validation
+        /// - Marks stream as corrupted if partial send occurs
+        /// - If buffer is full, returns error without corrupting the stream
         dp::Res<void> send(const Message &msg) override {
             if (!connected_) {
                 echo::trace("send called but not connected");
@@ -150,8 +157,8 @@ namespace netpipe {
 
             echo::trace("shm send ", msg.size(), " bytes");
 
-            // Calculate total bytes needed (4 byte length + payload)
-            dp::usize total_bytes = 4 + msg.size();
+            // Calculate total bytes needed (4 byte marker + 4 byte length + payload)
+            dp::usize total_bytes = 8 + msg.size();
 
             // Check if we have enough space
             // This prevents partial messages from being written
@@ -162,6 +169,17 @@ namespace netpipe {
             if (available < total_bytes) {
                 echo::warn("ring buffer full: need ", total_bytes, " bytes, have ", available);
                 return dp::result::err(dp::Error::io_error("ring buffer full"));
+            }
+
+            // Push message boundary marker first (4 bytes)
+            // This helps detect message boundaries and corruption
+            auto marker_bytes = encode_u32_be(MESSAGE_BOUNDARY_MARKER);
+            for (dp::usize i = 0; i < 4; i++) {
+                auto res = send_buffer_.push(marker_bytes[i]);
+                if (res.is_err()) {
+                    echo::error("ring buffer full during marker send (should not happen after space check)");
+                    return dp::result::err(dp::Error::io_error("ring buffer full"));
+                }
             }
 
             // Encode length prefix (4 bytes big-endian)
@@ -216,6 +234,49 @@ namespace netpipe {
 
             auto start_time = std::chrono::steady_clock::now();
             dp::u32 poll_interval_us = POLL_INTERVAL_US; // Start with base interval
+
+            // Read message boundary marker (4 bytes) with polling and exponential backoff
+            // This validates message atomicity and helps detect corruption
+            dp::Array<dp::u8, 4> marker_bytes;
+            for (dp::usize i = 0; i < 4; i++) {
+                while (true) {
+                    auto res = recv_buffer_.pop();
+                    if (res.is_ok()) {
+                        marker_bytes[i] = res.value();
+                        poll_interval_us = POLL_INTERVAL_US; // Reset backoff on success
+                        break;
+                    }
+
+                    // Check timeout (only if timeout is set)
+                    if (recv_timeout_ms_ > 0) {
+                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                           std::chrono::steady_clock::now() - start_time)
+                                           .count();
+                        if (elapsed >= recv_timeout_ms_) {
+                            echo::trace("recv timeout waiting for marker byte ", i);
+                            // Timeout keeps connection alive - caller can retry
+                            return dp::result::err(dp::Error::timeout("recv timeout"));
+                        }
+                    }
+
+                    // Poll with exponential backoff to reduce CPU usage
+                    // Start at 100us, double up to max 10ms
+                    std::this_thread::sleep_for(std::chrono::microseconds(poll_interval_us));
+                    if (poll_interval_us < 10000) {
+                        poll_interval_us = std::min(poll_interval_us * 2, 10000u);
+                    }
+                }
+            }
+
+            // Validate message boundary marker
+            dp::u32 marker = decode_u32_be(marker_bytes.data());
+            if (marker != MESSAGE_BOUNDARY_MARKER) {
+                echo::error("invalid message boundary marker: expected 0x", std::hex, MESSAGE_BOUNDARY_MARKER,
+                            " got 0x", marker, std::dec);
+                // Stream is corrupted - close connection
+                connected_ = false;
+                return dp::result::err(dp::Error::io_error("stream corrupted - invalid message boundary"));
+            }
 
             // Read length prefix (4 bytes) with polling and exponential backoff
             dp::Array<dp::u8, 4> length_bytes;
