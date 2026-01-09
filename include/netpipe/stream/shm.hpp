@@ -2,7 +2,9 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstring>
 #include <datapod/pods/lockfree/ring_buffer.hpp>
+#include <mutex>
 #include <netpipe/remote/protocol.hpp>
 #include <netpipe/stream.hpp>
 #include <thread>
@@ -13,6 +15,14 @@ namespace netpipe {
     /// Ultra-low latency, same machine only
     /// Server writes to s2c, reads from c2s
     /// Client writes to c2s, reads from s2c
+    ///
+    /// IMPORTANT: This implementation uses SPSC (Single Producer Single Consumer) buffers.
+    /// The send() method is protected by a mutex to serialize multiple producers, but
+    /// the underlying buffer is still SPSC. For best performance, prefer single-threaded
+    /// send patterns or use TCP/IPC for heavy multi-threaded bidirectional RPC.
+    ///
+    /// Message framing: [4-byte length (big-endian)] [payload]
+    /// No boundary markers - length prefix is sufficient for framing.
     class ShmStream : public Stream {
       private:
         dp::RingBuffer<dp::SPSC, dp::u8> send_buffer_;
@@ -22,11 +32,11 @@ namespace netpipe {
         dp::String channel_name_;
         dp::usize buffer_size_;
         dp::u32 recv_timeout_ms_;
-        static constexpr dp::u32 POLL_INTERVAL_US = 100;
+        static constexpr dp::u32 POLL_INTERVAL_US = 10; // Start with 10us for low latency
 
-        // Message boundary marker for atomicity validation
-        // Using a magic value that's unlikely to appear naturally
-        static constexpr dp::u32 MESSAGE_BOUNDARY_MARKER = 0xDEADBEEF;
+        // Mutex to protect send operations (SPSC requires single producer)
+        // Multiple threads may call send() concurrently in bidirectional mode
+        mutable std::mutex send_mutex_;
 
       public:
         ShmStream() : connected_(false), is_server_(false), recv_timeout_ms_(0) {
@@ -36,6 +46,31 @@ namespace netpipe {
             if (connected_) {
                 close();
             }
+        }
+
+        // Delete copy constructor and assignment (mutex is not copyable)
+        ShmStream(const ShmStream &) = delete;
+        ShmStream &operator=(const ShmStream &) = delete;
+
+        // Allow move
+        ShmStream(ShmStream &&other) noexcept
+            : send_buffer_(std::move(other.send_buffer_)), recv_buffer_(std::move(other.recv_buffer_)),
+              connected_(other.connected_), is_server_(other.is_server_), channel_name_(std::move(other.channel_name_)),
+              buffer_size_(other.buffer_size_), recv_timeout_ms_(other.recv_timeout_ms_) {
+            other.connected_ = false;
+        }
+        ShmStream &operator=(ShmStream &&other) noexcept {
+            if (this != &other) {
+                send_buffer_ = std::move(other.send_buffer_);
+                recv_buffer_ = std::move(other.recv_buffer_);
+                connected_ = other.connected_;
+                is_server_ = other.is_server_;
+                channel_name_ = std::move(other.channel_name_);
+                buffer_size_ = other.buffer_size_;
+                recv_timeout_ms_ = other.recv_timeout_ms_;
+                other.connected_ = false;
+            }
+            return *this;
         }
 
         /// Server side: create BOTH ring buffers
@@ -48,8 +83,6 @@ namespace netpipe {
             echo::trace("creating shm bidirectional buffers ", endpoint.to_string());
 
             // Validate name length (need room for "/_s2c" suffix)
-            // With "/" prefix + "_s2c" suffix = 5 extra chars
-            // POSIX NAME_MAX is 255, so max base name is 255 - 5 = 250
             if (endpoint.name.size() > 250) {
                 echo::error("shm name too long (max 250 chars): ", endpoint.name.size());
                 return dp::result::err(dp::Error::invalid_argument("shm name exceeds 250 character limit"));
@@ -145,23 +178,20 @@ namespace netpipe {
         }
 
         /// Send message with length-prefix framing
-        /// ATOMICITY:
-        /// - Checks space before sending to avoid partial messages
-        /// - Adds boundary marker for message integrity validation
-        /// - Marks stream as corrupted if partial send occurs
-        /// - If buffer is full, returns error without corrupting the stream
-        /// SIZE VALIDATION:
-        /// - Validates message size before sending
-        /// - Max message size is buffer_size / 2 (to allow bidirectional traffic)
+        /// Thread-safe: protected by mutex for multi-producer scenarios
+        ///
+        /// The entire message (length + payload) is written in a tight loop without
+        /// yielding to ensure atomicity from the consumer's perspective.
         dp::Res<void> send(const Message &msg) override {
+            // Lock mutex to ensure single producer (SPSC requirement)
+            std::lock_guard<std::mutex> lock(send_mutex_);
+
             if (!connected_) {
                 echo::trace("send called but not connected");
                 return dp::result::err(dp::Error::not_found("not connected"));
             }
 
-            // Validate message size
-            // Max size is buffer_size / 2 to allow bidirectional communication
-            // (both directions can have messages in flight simultaneously)
+            // Validate message size (max is buffer_size / 2 for bidirectional)
             dp::usize max_message_size = buffer_size_ / 2;
             if (msg.size() > max_message_size) {
                 echo::error("message too large: ", msg.size(), " bytes (max ", max_message_size, " bytes)");
@@ -170,58 +200,53 @@ namespace netpipe {
 
             echo::trace("shm send ", msg.size(), " bytes");
 
-            // Calculate total bytes needed (4 byte marker + 4 byte length + payload)
-            dp::usize total_bytes = 8 + msg.size();
+            // Total bytes: 4 byte length + payload
+            dp::usize total_bytes = 4 + msg.size();
 
-            // Check if we have enough space
-            // This prevents partial messages from being written
-            dp::usize current_size = send_buffer_.size();
-            dp::usize buffer_capacity = send_buffer_.capacity();
-            dp::usize available = buffer_capacity - current_size;
+            // Wait for enough space with exponential backoff
+            dp::u32 retry_interval_us = POLL_INTERVAL_US;
+            constexpr dp::u32 MAX_RETRY_MS = 10000; // 10 second timeout
+            auto start_time = std::chrono::steady_clock::now();
 
-            if (available < total_bytes) {
-                echo::warn("ring buffer full: need ", total_bytes, " bytes, have ", available);
-                return dp::result::err(dp::Error::io_error("ring buffer full"));
-            }
+            while (true) {
+                dp::usize buffer_capacity = send_buffer_.capacity();
+                dp::usize current_size = send_buffer_.size();
+                dp::usize available = buffer_capacity - current_size;
 
-            // Push message boundary marker first (4 bytes)
-            // This helps detect message boundaries and corruption
-            auto marker_bytes = encode_u32_be(MESSAGE_BOUNDARY_MARKER);
-            for (dp::usize i = 0; i < 4; i++) {
-                auto res = send_buffer_.push(marker_bytes[i]);
-                if (res.is_err()) {
-                    echo::error("ring buffer full during marker send (should not happen after space check)");
-                    return dp::result::err(dp::Error::io_error("ring buffer full"));
+                if (available >= total_bytes) {
+                    break;
+                }
+
+                auto elapsed =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time)
+                        .count();
+                if (elapsed >= MAX_RETRY_MS) {
+                    echo::error("ring buffer full timeout: need ", total_bytes, " bytes, have ", available);
+                    return dp::result::err(dp::Error::io_error("ring buffer full - timeout"));
+                }
+
+                std::this_thread::sleep_for(std::chrono::microseconds(retry_interval_us));
+                if (retry_interval_us < 1000) {
+                    retry_interval_us = std::min(retry_interval_us * 2, 1000u);
                 }
             }
 
             // Encode length prefix (4 bytes big-endian)
             auto length_bytes = encode_u32_be(static_cast<dp::u32>(msg.size()));
 
-            // Push length prefix bytes
-            // If this fails, we haven't corrupted the stream yet
+            // Push length prefix - tight loop, no yielding
             for (dp::usize i = 0; i < 4; i++) {
-                auto res = send_buffer_.push(length_bytes[i]);
-                if (res.is_err()) {
-                    echo::error("ring buffer full during length send (should not happen after space check)");
-                    return dp::result::err(dp::Error::io_error("ring buffer full"));
+                while (send_buffer_.push(length_bytes[i]).is_err()) {
+                    // Spin-wait - should rarely happen since we checked space
+                    std::this_thread::yield();
                 }
             }
 
-            // Push payload bytes in batches for better performance
-            // Process in chunks to reduce per-byte overhead
-            constexpr dp::usize BATCH_SIZE = 1024;
-            for (dp::usize offset = 0; offset < msg.size(); offset += BATCH_SIZE) {
-                dp::usize batch_end = std::min(offset + BATCH_SIZE, msg.size());
-                for (dp::usize i = offset; i < batch_end; i++) {
-                    auto res = send_buffer_.push(msg[i]);
-                    if (res.is_err()) {
-                        echo::error("ring buffer full during payload send at byte ", i);
-                        // At this point we've partially sent - this is a critical error
-                        // The stream is now corrupted and should be closed
-                        connected_ = false;
-                        return dp::result::err(dp::Error::io_error("ring buffer full - stream corrupted"));
-                    }
+            // Push payload - tight loop, no yielding
+            for (dp::usize i = 0; i < msg.size(); i++) {
+                while (send_buffer_.push(msg[i]).is_err()) {
+                    // Spin-wait - should rarely happen since we checked space
+                    std::this_thread::yield();
                 }
             }
 
@@ -230,13 +255,7 @@ namespace netpipe {
         }
 
         /// Receive message with length-prefix framing
-        /// Supports blocking with timeout via polling
-        /// TIMEOUT HANDLING:
-        /// - Timeouts are expected behavior (not errors) when using set_recv_timeout()
-        /// - Connection stays alive after timeout - caller can retry
-        /// - Timeout does NOT mark connection as disconnected
-        /// - This allows RPC to implement request timeouts without breaking the connection
-        /// - Behavior matches TcpStream and IpcStream for consistency
+        /// Blocks until a complete message is available or timeout
         dp::Res<Message> recv() override {
             if (!connected_) {
                 echo::trace("recv called but not connected");
@@ -246,79 +265,33 @@ namespace netpipe {
             echo::trace("shm recv waiting");
 
             auto start_time = std::chrono::steady_clock::now();
-            dp::u32 poll_interval_us = POLL_INTERVAL_US; // Start with base interval
+            dp::u32 poll_interval_us = POLL_INTERVAL_US;
 
-            // Read message boundary marker (4 bytes) with polling and exponential backoff
-            // This validates message atomicity and helps detect corruption
-            dp::Array<dp::u8, 4> marker_bytes;
-            for (dp::usize i = 0; i < 4; i++) {
-                while (true) {
-                    auto res = recv_buffer_.pop();
-                    if (res.is_ok()) {
-                        marker_bytes[i] = res.value();
-                        poll_interval_us = POLL_INTERVAL_US; // Reset backoff on success
-                        break;
-                    }
-
-                    // Check timeout (only if timeout is set)
-                    if (recv_timeout_ms_ > 0) {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::steady_clock::now() - start_time)
-                                           .count();
-                        if (elapsed >= recv_timeout_ms_) {
-                            echo::trace("recv timeout waiting for marker byte ", i);
-                            // Timeout keeps connection alive - caller can retry
-                            return dp::result::err(dp::Error::timeout("recv timeout"));
-                        }
-                    }
-
-                    // Poll with exponential backoff to reduce CPU usage
-                    // Start at 100us, double up to max 10ms
-                    std::this_thread::sleep_for(std::chrono::microseconds(poll_interval_us));
-                    if (poll_interval_us < 10000) {
-                        poll_interval_us = std::min(poll_interval_us * 2, 10000u);
-                    }
-                }
-            }
-
-            // Validate message boundary marker
-            dp::u32 marker = decode_u32_be(marker_bytes.data());
-            if (marker != MESSAGE_BOUNDARY_MARKER) {
-                echo::error("invalid message boundary marker: expected 0x", std::hex, MESSAGE_BOUNDARY_MARKER,
-                            " got 0x", marker, std::dec);
-                // Stream is corrupted - close connection
-                connected_ = false;
-                return dp::result::err(dp::Error::io_error("stream corrupted - invalid message boundary"));
-            }
-
-            // Read length prefix (4 bytes) with polling and exponential backoff
+            // Read length prefix (4 bytes) with polling
             dp::Array<dp::u8, 4> length_bytes;
             for (dp::usize i = 0; i < 4; i++) {
                 while (true) {
                     auto res = recv_buffer_.pop();
                     if (res.is_ok()) {
                         length_bytes[i] = res.value();
-                        poll_interval_us = POLL_INTERVAL_US; // Reset backoff on success
+                        poll_interval_us = POLL_INTERVAL_US; // Reset backoff
                         break;
                     }
 
-                    // Check timeout (only if timeout is set)
+                    // Check timeout
                     if (recv_timeout_ms_ > 0) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - start_time)
                                            .count();
                         if (elapsed >= recv_timeout_ms_) {
                             echo::trace("recv timeout waiting for length byte ", i);
-                            // Timeout keeps connection alive - caller can retry
                             return dp::result::err(dp::Error::timeout("recv timeout"));
                         }
                     }
 
-                    // Poll with exponential backoff to reduce CPU usage
-                    // Start at 100us, double up to max 10ms
                     std::this_thread::sleep_for(std::chrono::microseconds(poll_interval_us));
-                    if (poll_interval_us < 10000) {
-                        poll_interval_us = std::min(poll_interval_us * 2, 10000u);
+                    if (poll_interval_us < 1000) {
+                        poll_interval_us = std::min(poll_interval_us * 2, 1000u);
                     }
                 }
             }
@@ -326,63 +299,54 @@ namespace netpipe {
             dp::u32 length = decode_u32_be(length_bytes.data());
             echo::trace("recv expecting ", length, " bytes");
 
-            // Validate message size before allocating
-            // Check against global maximum first
+            // Validate message size
             if (length > remote::MAX_MESSAGE_SIZE) {
-                echo::error("received message too large: ", length, " bytes (max: ", remote::MAX_MESSAGE_SIZE, ")");
+                echo::error("received message too large: ", length, " bytes");
                 connected_ = false;
                 return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
             }
 
-            // Check against buffer capacity (buffer_size / 2 to allow bidirectional)
             dp::usize max_buffer_size = buffer_size_ / 2;
             if (length > max_buffer_size) {
-                echo::error("received message exceeds buffer capacity: ", length,
-                            " bytes (buffer max: ", max_buffer_size, " bytes)");
+                echo::error("received message exceeds buffer capacity: ", length, " bytes");
                 connected_ = false;
                 return dp::result::err(dp::Error::invalid_argument("message exceeds buffer capacity"));
             }
 
-            // Allocate message buffer with exception handling
+            // Allocate message buffer
             Message msg;
             try {
                 msg.resize(length);
             } catch (const std::bad_alloc &e) {
-                echo::error("failed to allocate message buffer: ", length, " bytes - ", e.what());
+                echo::error("failed to allocate message buffer: ", length, " bytes");
                 connected_ = false;
                 return dp::result::err(dp::Error::io_error("memory allocation failed"));
-            } catch (const std::exception &e) {
-                echo::error("unexpected error allocating message buffer: ", e.what());
-                connected_ = false;
-                return dp::result::err(dp::Error::io_error("allocation error"));
             }
 
-            // Read payload with polling and exponential backoff
+            // Read payload with polling
             for (dp::usize i = 0; i < length; i++) {
                 while (true) {
                     auto res = recv_buffer_.pop();
                     if (res.is_ok()) {
                         msg[i] = res.value();
-                        poll_interval_us = POLL_INTERVAL_US; // Reset backoff on success
+                        poll_interval_us = POLL_INTERVAL_US; // Reset backoff
                         break;
                     }
 
-                    // Check timeout (only if timeout is set)
+                    // Check timeout
                     if (recv_timeout_ms_ > 0) {
                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now() - start_time)
                                            .count();
                         if (elapsed >= recv_timeout_ms_) {
                             echo::trace("recv timeout waiting for payload byte ", i);
-                            // Timeout keeps connection alive - caller can retry
                             return dp::result::err(dp::Error::timeout("recv timeout"));
                         }
                     }
 
-                    // Poll with exponential backoff to reduce CPU usage
                     std::this_thread::sleep_for(std::chrono::microseconds(poll_interval_us));
-                    if (poll_interval_us < 10000) {
-                        poll_interval_us = std::min(poll_interval_us * 2, 10000u);
+                    if (poll_interval_us < 1000) {
+                        poll_interval_us = std::min(poll_interval_us * 2, 1000u);
                     }
                 }
             }

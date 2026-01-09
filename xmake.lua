@@ -10,7 +10,7 @@ local PROJECT_VERSION = "0.0.5"
 --   System: "pkgconfig::libname" or {system = "boost"}
 local LIB_DEPS = {
     {"echo", "https://github.com/bresilla/echo.git", "0.0.23"},
-    {"datapod", "https://github.com/robolibs/datapod.git", "0.0.31"},
+    {"datapod", "https://github.com/robolibs/datapod.git", "0.0.34"},
 }
 local EXAMPLE_DEPS = {
     {system = "rerun_sdk"},
