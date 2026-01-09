@@ -4,82 +4,174 @@
 #include <chrono>
 #include <cstring>
 #include <datapod/pods/lockfree/ring_buffer.hpp>
+#include <fcntl.h>
 #include <mutex>
 #include <netpipe/remote/protocol.hpp>
 #include <netpipe/stream.hpp>
+#include <sys/mman.h>
 #include <thread>
+#include <unistd.h>
 
 namespace netpipe {
 
     /// Connection request structure for SHM handshake
-    /// Client writes this to connection queue, server reads and creates dedicated buffers
     struct ShmConnRequest {
-        dp::u64 client_id;   // Unique client identifier (e.g., PID + timestamp)
-        dp::u32 buffer_size; // Requested buffer size
-        dp::u32 reserved;    // Padding for alignment
-    };
-
-    /// Connection response - server writes back to signal buffers are ready
-    struct ShmConnResponse {
-        dp::u64 client_id; // Echo back client ID
-        dp::u64 conn_id;   // Server-assigned connection ID
-        dp::u32 status;    // 0 = success, non-zero = error
+        dp::u64 client_id;
+        dp::u32 buffer_size;
         dp::u32 reserved;
     };
 
+    /// Connection response
+    struct ShmConnResponse {
+        dp::u64 client_id;
+        dp::u64 conn_id;
+        dp::u32 status;
+        dp::u32 reserved;
+    };
+
+    /// Fast shared memory message buffer header
+    /// Uses bulk memcpy instead of byte-by-byte operations
+    struct alignas(64) ShmMsgHeader {
+        std::atomic<dp::u64> msg_size;  // Size of current message (0 = no message)
+        std::atomic<dp::u32> msg_ready; // 1 = message ready to read, 0 = buffer free
+        dp::u32 capacity;               // Max message size
+        dp::u8 padding[48];             // Pad to cache line
+    };
+
     /// Bidirectional shared memory stream with TCP-like connection semantics
-    ///
-    /// Supports multiple independent connections via accept()/connect() pattern:
-    /// - Server: listen_shm() -> accept() loop (returns new ShmStream per client)
-    /// - Client: connect_shm() (establishes dedicated buffer pair with server)
-    ///
-    /// Architecture:
-    /// - Connection queue: MPMC buffer where clients register
-    /// - Response queue: MPMC buffer where server ACKs connections
-    /// - Per-connection: dedicated s2c/c2s buffer pair
-    ///
-    /// Message framing: [4-byte length (big-endian)] [payload]
+    /// Now uses bulk memcpy for high-performance data transfer
     class ShmStream : public Stream {
       private:
-        // Per-connection buffers (for established connections)
-        dp::RingBuffer<dp::MPMC, dp::u8> send_buffer_;
-        dp::RingBuffer<dp::MPMC, dp::u8> recv_buffer_;
+        // Fast message buffers (raw shared memory with bulk memcpy)
+        void *send_shm_ptr_;
+        void *recv_shm_ptr_;
+        dp::usize send_shm_size_;
+        dp::usize recv_shm_size_;
+        int send_shm_fd_;
+        int recv_shm_fd_;
 
-        // Listening state (for server accepting connections)
-        dp::RingBuffer<dp::MPMC, dp::u8> conn_queue_; // Clients write connection requests
-        dp::RingBuffer<dp::MPMC, dp::u8> resp_queue_; // Server writes responses
+        // Connection queue (still uses ring buffer for small handshake messages)
+        dp::RingBuffer<dp::MPMC, dp::u8> conn_queue_;
+        dp::RingBuffer<dp::MPMC, dp::u8> resp_queue_;
         std::atomic<dp::u64> next_conn_id_{0};
 
         bool connected_;
         bool listening_;
         bool is_server_;
-        bool owns_shm_; // True if we created the SHM (should unlink on close)
+        bool owns_shm_;
         dp::String channel_name_;
-        dp::u64 conn_id_; // Connection ID for this stream
+        dp::u64 conn_id_;
         dp::usize buffer_size_;
         dp::u32 recv_timeout_ms_;
-        static constexpr dp::u32 POLL_INTERVAL_US = 10;
-        static constexpr dp::usize CONN_QUEUE_SIZE = 4096; // Small queue for connection handshakes
+
+        static constexpr dp::u32 POLL_INTERVAL_US = 1;       // Start with 1us
+        static constexpr dp::u32 MAX_POLL_INTERVAL_US = 100; // Max 100us backoff
+        static constexpr dp::usize CONN_QUEUE_SIZE = 4096;
 
         mutable std::mutex send_mutex_;
 
-        /// Private constructor for accepted connections (server-side)
-        ShmStream(dp::RingBuffer<dp::MPMC, dp::u8> &&send_buf, dp::RingBuffer<dp::MPMC, dp::u8> &&recv_buf,
+        /// Get header and data pointers from shm region
+        static ShmMsgHeader *get_header(void *shm_ptr) { return static_cast<ShmMsgHeader *>(shm_ptr); }
+
+        static dp::u8 *get_data(void *shm_ptr) { return static_cast<dp::u8 *>(shm_ptr) + sizeof(ShmMsgHeader); }
+
+        /// Create a shared memory message buffer
+        static bool create_msg_buffer(const char *name, dp::usize capacity, void *&ptr, dp::usize &size, int &fd) {
+            // Total size = header + data
+            size = sizeof(ShmMsgHeader) + capacity;
+
+            fd = ::shm_open(name, O_CREAT | O_RDWR | O_EXCL, 0666);
+            if (fd < 0) {
+                // Try to unlink and recreate
+                ::shm_unlink(name);
+                fd = ::shm_open(name, O_CREAT | O_RDWR | O_EXCL, 0666);
+                if (fd < 0) {
+                    echo::error("shm_open failed: ", name, " - ", strerror(errno));
+                    return false;
+                }
+            }
+
+            if (::ftruncate(fd, static_cast<off_t>(size)) < 0) {
+                echo::error("ftruncate failed: ", strerror(errno));
+                ::close(fd);
+                ::shm_unlink(name);
+                return false;
+            }
+
+            ptr = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (ptr == MAP_FAILED) {
+                echo::error("mmap failed: ", strerror(errno));
+                ::close(fd);
+                ::shm_unlink(name);
+                return false;
+            }
+
+            // Initialize header
+            auto *header = get_header(ptr);
+            new (&header->msg_size) std::atomic<dp::u64>(0);
+            new (&header->msg_ready) std::atomic<dp::u32>(0);
+            header->capacity = static_cast<dp::u32>(capacity);
+
+            return true;
+        }
+
+        /// Attach to existing shared memory message buffer
+        static bool attach_msg_buffer(const char *name, void *&ptr, dp::usize &size, int &fd) {
+            fd = ::shm_open(name, O_RDWR, 0666);
+            if (fd < 0) {
+                echo::error("shm_open attach failed: ", name, " - ", strerror(errno));
+                return false;
+            }
+
+            // Get actual size
+            struct stat st;
+            if (::fstat(fd, &st) < 0) {
+                echo::error("fstat failed: ", strerror(errno));
+                ::close(fd);
+                return false;
+            }
+            size = static_cast<dp::usize>(st.st_size);
+
+            ptr = ::mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+            if (ptr == MAP_FAILED) {
+                echo::error("mmap attach failed: ", strerror(errno));
+                ::close(fd);
+                return false;
+            }
+
+            return true;
+        }
+
+        /// Close a shared memory buffer
+        static void close_msg_buffer(void *ptr, dp::usize size, int fd, const char *name, bool unlink) {
+            if (ptr && ptr != MAP_FAILED) {
+                ::munmap(ptr, size);
+            }
+            if (fd >= 0) {
+                ::close(fd);
+            }
+            if (unlink && name) {
+                ::shm_unlink(name);
+            }
+        }
+
+        /// Private constructor for accepted connections
+        ShmStream(void *send_ptr, dp::usize send_size, int send_fd, void *recv_ptr, dp::usize recv_size, int recv_fd,
                   const dp::String &channel_name, dp::u64 conn_id, dp::usize buffer_size)
-            : send_buffer_(std::move(send_buf)), recv_buffer_(std::move(recv_buf)), connected_(true), listening_(false),
-              is_server_(true), owns_shm_(true), channel_name_(channel_name), conn_id_(conn_id),
-              buffer_size_(buffer_size), recv_timeout_ms_(0) {
+            : send_shm_ptr_(send_ptr), recv_shm_ptr_(recv_ptr), send_shm_size_(send_size), recv_shm_size_(recv_size),
+              send_shm_fd_(send_fd), recv_shm_fd_(recv_fd), connected_(true), listening_(false), is_server_(true),
+              owns_shm_(true), channel_name_(channel_name), conn_id_(conn_id), buffer_size_(buffer_size),
+              recv_timeout_ms_(0) {
             echo::debug("ShmStream created for connection ", conn_id);
         }
 
-        /// Generate unique client ID
         static dp::u64 generate_client_id() {
             auto now = std::chrono::steady_clock::now().time_since_epoch();
             auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now).count();
             return static_cast<dp::u64>(::getpid()) ^ static_cast<dp::u64>(ns);
         }
 
-        /// Write a struct to ring buffer byte-by-byte
+        /// Write a struct to ring buffer (for handshake only)
         template <typename T>
         bool write_struct(dp::RingBuffer<dp::MPMC, dp::u8> &buf, const T &data, dp::u32 timeout_ms) {
             const auto *bytes = reinterpret_cast<const dp::u8 *>(&data);
@@ -100,7 +192,7 @@ namespace netpipe {
             return true;
         }
 
-        /// Read a struct from ring buffer byte-by-byte
+        /// Read a struct from ring buffer (for handshake only)
         template <typename T> bool read_struct(dp::RingBuffer<dp::MPMC, dp::u8> &buf, T &data, dp::u32 timeout_ms) {
             auto *bytes = reinterpret_cast<dp::u8 *>(&data);
             auto start = std::chrono::steady_clock::now();
@@ -127,8 +219,9 @@ namespace netpipe {
 
       public:
         ShmStream()
-            : connected_(false), listening_(false), is_server_(false), owns_shm_(false), conn_id_(0), buffer_size_(0),
-              recv_timeout_ms_(0) {
+            : send_shm_ptr_(nullptr), recv_shm_ptr_(nullptr), send_shm_size_(0), recv_shm_size_(0), send_shm_fd_(-1),
+              recv_shm_fd_(-1), connected_(false), listening_(false), is_server_(false), owns_shm_(false), conn_id_(0),
+              buffer_size_(0), recv_timeout_ms_(0) {
             echo::trace("ShmStream constructed");
         }
 
@@ -138,18 +231,22 @@ namespace netpipe {
             }
         }
 
-        // Delete copy
         ShmStream(const ShmStream &) = delete;
         ShmStream &operator=(const ShmStream &) = delete;
 
-        // Allow move
         ShmStream(ShmStream &&other) noexcept
-            : send_buffer_(std::move(other.send_buffer_)), recv_buffer_(std::move(other.recv_buffer_)),
+            : send_shm_ptr_(other.send_shm_ptr_), recv_shm_ptr_(other.recv_shm_ptr_),
+              send_shm_size_(other.send_shm_size_), recv_shm_size_(other.recv_shm_size_),
+              send_shm_fd_(other.send_shm_fd_), recv_shm_fd_(other.recv_shm_fd_),
               conn_queue_(std::move(other.conn_queue_)), resp_queue_(std::move(other.resp_queue_)),
               connected_(other.connected_), listening_(other.listening_), is_server_(other.is_server_),
               owns_shm_(other.owns_shm_), channel_name_(std::move(other.channel_name_)), conn_id_(other.conn_id_),
               buffer_size_(other.buffer_size_), recv_timeout_ms_(other.recv_timeout_ms_) {
             next_conn_id_.store(other.next_conn_id_.load());
+            other.send_shm_ptr_ = nullptr;
+            other.recv_shm_ptr_ = nullptr;
+            other.send_shm_fd_ = -1;
+            other.recv_shm_fd_ = -1;
             other.connected_ = false;
             other.listening_ = false;
             other.owns_shm_ = false;
@@ -160,8 +257,12 @@ namespace netpipe {
                 if (connected_ || listening_)
                     close();
 
-                send_buffer_ = std::move(other.send_buffer_);
-                recv_buffer_ = std::move(other.recv_buffer_);
+                send_shm_ptr_ = other.send_shm_ptr_;
+                recv_shm_ptr_ = other.recv_shm_ptr_;
+                send_shm_size_ = other.send_shm_size_;
+                recv_shm_size_ = other.recv_shm_size_;
+                send_shm_fd_ = other.send_shm_fd_;
+                recv_shm_fd_ = other.recv_shm_fd_;
                 conn_queue_ = std::move(other.conn_queue_);
                 resp_queue_ = std::move(other.resp_queue_);
                 next_conn_id_.store(other.next_conn_id_.load());
@@ -174,6 +275,10 @@ namespace netpipe {
                 buffer_size_ = other.buffer_size_;
                 recv_timeout_ms_ = other.recv_timeout_ms_;
 
+                other.send_shm_ptr_ = nullptr;
+                other.recv_shm_ptr_ = nullptr;
+                other.send_shm_fd_ = -1;
+                other.recv_shm_fd_ = -1;
                 other.connected_ = false;
                 other.listening_ = false;
                 other.owns_shm_ = false;
@@ -181,7 +286,6 @@ namespace netpipe {
             return *this;
         }
 
-        /// Server side: create connection queue and start listening
         dp::Res<void> listen(const TcpEndpoint &endpoint) override {
             ShmEndpoint shm_endpoint{endpoint.host, static_cast<dp::usize>(endpoint.port)};
             return listen_shm(shm_endpoint);
@@ -200,17 +304,14 @@ namespace netpipe {
             channel_name_ = endpoint.name;
             buffer_size_ = endpoint.size;
 
-            // Create connection queue names
             char connq_name[256];
             char respq_name[256];
             snprintf(connq_name, sizeof(connq_name), "/%s_connq", endpoint.name.c_str());
             snprintf(respq_name, sizeof(respq_name), "/%s_respq", endpoint.name.c_str());
 
-            // Clean up any existing shared memory
             ::shm_unlink(connq_name);
             ::shm_unlink(respq_name);
 
-            // Create connection queue (clients write requests here)
             auto connq_res = dp::RingBuffer<dp::MPMC, dp::u8>::create_shm(dp::String(connq_name), CONN_QUEUE_SIZE);
             if (connq_res.is_err()) {
                 echo::error("failed to create connection queue");
@@ -218,7 +319,6 @@ namespace netpipe {
             }
             conn_queue_ = std::move(connq_res.value());
 
-            // Create response queue (server writes ACKs here)
             auto respq_res = dp::RingBuffer<dp::MPMC, dp::u8>::create_shm(dp::String(respq_name), CONN_QUEUE_SIZE);
             if (respq_res.is_err()) {
                 echo::error("failed to create response queue");
@@ -232,8 +332,6 @@ namespace netpipe {
             return dp::result::ok();
         }
 
-        /// Server side: accept incoming connection
-        /// Blocks until a client connects, then returns a NEW ShmStream for that connection
         dp::Res<std::unique_ptr<Stream>> accept() override {
             if (!listening_) {
                 echo::error("accept called but not listening");
@@ -242,7 +340,6 @@ namespace netpipe {
 
             echo::trace("ShmStream waiting for connection");
 
-            // Read connection request from queue
             ShmConnRequest req;
             if (!read_struct(conn_queue_, req, recv_timeout_ms_)) {
                 return dp::result::err(dp::Error::timeout("accept timeout"));
@@ -250,10 +347,8 @@ namespace netpipe {
 
             echo::debug("received connection request from client ", req.client_id);
 
-            // Assign connection ID
             dp::u64 conn_id = next_conn_id_.fetch_add(1);
 
-            // Create dedicated buffer pair for this connection
             char s2c_name[256];
             char c2s_name[256];
             snprintf(s2c_name, sizeof(s2c_name), "/%s_%llu_s2c", channel_name_.c_str(),
@@ -261,50 +356,49 @@ namespace netpipe {
             snprintf(c2s_name, sizeof(c2s_name), "/%s_%llu_c2s", channel_name_.c_str(),
                      static_cast<unsigned long long>(conn_id));
 
-            // Clean up any stale buffers
             ::shm_unlink(s2c_name);
             ::shm_unlink(c2s_name);
 
             dp::usize buf_size = req.buffer_size > 0 ? req.buffer_size : buffer_size_;
 
-            // Create server-to-client buffer
-            auto s2c_res = dp::RingBuffer<dp::MPMC, dp::u8>::create_shm(dp::String(s2c_name), buf_size);
-            if (s2c_res.is_err()) {
+            // Create fast message buffers
+            void *s2c_ptr = nullptr;
+            void *c2s_ptr = nullptr;
+            dp::usize s2c_size = 0, c2s_size = 0;
+            int s2c_fd = -1, c2s_fd = -1;
+
+            if (!create_msg_buffer(s2c_name, buf_size, s2c_ptr, s2c_size, s2c_fd)) {
                 echo::error("failed to create s2c buffer for conn ", conn_id);
-                // Send error response
                 ShmConnResponse resp{req.client_id, conn_id, 1, 0};
                 write_struct(resp_queue_, resp, 1000);
                 return dp::result::err(dp::Error::io_error("failed to create connection buffers"));
             }
 
-            // Create client-to-server buffer
-            auto c2s_res = dp::RingBuffer<dp::MPMC, dp::u8>::create_shm(dp::String(c2s_name), buf_size);
-            if (c2s_res.is_err()) {
+            if (!create_msg_buffer(c2s_name, buf_size, c2s_ptr, c2s_size, c2s_fd)) {
                 echo::error("failed to create c2s buffer for conn ", conn_id);
+                close_msg_buffer(s2c_ptr, s2c_size, s2c_fd, s2c_name, true);
                 ShmConnResponse resp{req.client_id, conn_id, 2, 0};
                 write_struct(resp_queue_, resp, 1000);
                 return dp::result::err(dp::Error::io_error("failed to create connection buffers"));
             }
 
-            // Send success response to client
             ShmConnResponse resp{req.client_id, conn_id, 0, 0};
             if (!write_struct(resp_queue_, resp, 5000)) {
                 echo::error("failed to send connection response");
+                close_msg_buffer(s2c_ptr, s2c_size, s2c_fd, s2c_name, true);
+                close_msg_buffer(c2s_ptr, c2s_size, c2s_fd, c2s_name, true);
                 return dp::result::err(dp::Error::io_error("failed to send connection response"));
             }
 
             echo::info("ShmStream accepted connection ", conn_id, " from client ", req.client_id);
 
-            // Create new ShmStream for this connection
             // Server sends on s2c, receives on c2s
-            auto client_stream = std::unique_ptr<Stream>(new ShmStream(std::move(s2c_res.value()), // send = s2c
-                                                                       std::move(c2s_res.value()), // recv = c2s
-                                                                       channel_name_, conn_id, buf_size));
+            auto client_stream = std::unique_ptr<Stream>(
+                new ShmStream(s2c_ptr, s2c_size, s2c_fd, c2s_ptr, c2s_size, c2s_fd, channel_name_, conn_id, buf_size));
 
             return dp::result::ok(std::move(client_stream));
         }
 
-        /// Client side: connect to server
         dp::Res<void> connect(const TcpEndpoint &endpoint) override {
             ShmEndpoint shm_endpoint{endpoint.host, static_cast<dp::usize>(endpoint.port)};
             return connect_shm(shm_endpoint);
@@ -323,7 +417,6 @@ namespace netpipe {
             channel_name_ = endpoint.name;
             buffer_size_ = endpoint.size;
 
-            // Attach to connection queues
             char connq_name[256];
             char respq_name[256];
             snprintf(connq_name, sizeof(connq_name), "/%s_connq", endpoint.name.c_str());
@@ -343,7 +436,6 @@ namespace netpipe {
             }
             resp_queue_ = std::move(respq_res.value());
 
-            // Generate unique client ID and send connection request
             dp::u64 client_id = generate_client_id();
             ShmConnRequest req{client_id, static_cast<dp::u32>(endpoint.size), 0};
 
@@ -354,7 +446,6 @@ namespace netpipe {
                 return dp::result::err(dp::Error::timeout("connection timeout"));
             }
 
-            // Wait for response (need to filter for our client_id)
             auto start = std::chrono::steady_clock::now();
             constexpr dp::u32 CONNECT_TIMEOUT_MS = 10000;
 
@@ -370,7 +461,6 @@ namespace netpipe {
                         conn_id_ = resp.conn_id;
                         echo::debug("received connection response, conn_id=", conn_id_);
 
-                        // Attach to our dedicated buffers
                         char s2c_name[256];
                         char c2s_name[256];
                         snprintf(s2c_name, sizeof(s2c_name), "/%s_%llu_s2c", channel_name_.c_str(),
@@ -379,26 +469,21 @@ namespace netpipe {
                                  static_cast<unsigned long long>(conn_id_));
 
                         // Client sends on c2s, receives on s2c
-                        auto send_res = dp::RingBuffer<dp::MPMC, dp::u8>::attach_shm(dp::String(c2s_name));
-                        if (send_res.is_err()) {
+                        if (!attach_msg_buffer(c2s_name, send_shm_ptr_, send_shm_size_, send_shm_fd_)) {
                             echo::error("failed to attach to c2s buffer");
                             return dp::result::err(dp::Error::io_error("failed to attach to buffers"));
                         }
-                        send_buffer_ = std::move(send_res.value());
 
-                        auto recv_res = dp::RingBuffer<dp::MPMC, dp::u8>::attach_shm(dp::String(s2c_name));
-                        if (recv_res.is_err()) {
+                        if (!attach_msg_buffer(s2c_name, recv_shm_ptr_, recv_shm_size_, recv_shm_fd_)) {
                             echo::error("failed to attach to s2c buffer");
+                            close_msg_buffer(send_shm_ptr_, send_shm_size_, send_shm_fd_, nullptr, false);
                             return dp::result::err(dp::Error::io_error("failed to attach to buffers"));
                         }
-                        recv_buffer_ = std::move(recv_res.value());
 
                         connected_ = true;
                         echo::info("ShmStream connected, conn_id=", conn_id_);
                         return dp::result::ok();
                     }
-                    // Response for different client - this shouldn't happen often
-                    // but could in race conditions. The other client will retry.
                     echo::trace("got response for different client, continuing");
                 }
 
@@ -412,108 +497,94 @@ namespace netpipe {
             }
         }
 
-        /// Send message with length-prefix framing
+        /// Send message using bulk memcpy - FAST!
         dp::Res<void> send(const Message &msg) override {
             std::lock_guard<std::mutex> lock(send_mutex_);
 
-            if (!connected_) {
+            if (!connected_ || !send_shm_ptr_) {
                 echo::trace("send called but not connected");
                 return dp::result::err(dp::Error::not_found("not connected"));
             }
 
-            dp::usize max_message_size = buffer_size_ / 2;
-            if (msg.size() > max_message_size) {
-                echo::error("message too large: ", msg.size(), " bytes (max ", max_message_size, ")");
+            auto *header = get_header(send_shm_ptr_);
+            dp::u8 *data = get_data(send_shm_ptr_);
+
+            if (msg.size() > header->capacity) {
+                echo::error("message too large: ", msg.size(), " bytes (max ", header->capacity, ")");
                 return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
             }
 
             echo::trace("shm send ", msg.size(), " bytes");
 
-            dp::usize total_bytes = 4 + msg.size();
-
-            // Wait for space
-            dp::u32 retry_interval_us = POLL_INTERVAL_US;
-            constexpr dp::u32 MAX_RETRY_MS = 10000;
+            // Wait for buffer to be free (msg_ready == 0)
             auto start_time = std::chrono::steady_clock::now();
+            constexpr dp::u32 MAX_WAIT_MS = 30000;
+            dp::u32 poll_us = POLL_INTERVAL_US;
 
-            while (true) {
-                dp::usize available = send_buffer_.capacity() - send_buffer_.size();
-                if (available >= total_bytes)
-                    break;
-
+            while (header->msg_ready.load(std::memory_order_acquire) != 0) {
                 auto elapsed =
                     std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start_time)
                         .count();
-                if (elapsed >= MAX_RETRY_MS) {
-                    echo::error("ring buffer full timeout");
-                    return dp::result::err(dp::Error::timeout("buffer full"));
+                if (elapsed >= MAX_WAIT_MS) {
+                    echo::error("send timeout waiting for buffer");
+                    return dp::result::err(dp::Error::timeout("send buffer full"));
                 }
 
-                std::this_thread::sleep_for(std::chrono::microseconds(retry_interval_us));
-                if (retry_interval_us < 1000) {
-                    retry_interval_us = std::min(retry_interval_us * 2, 1000u);
-                }
-            }
-
-            // Write length prefix
-            auto length_bytes = encode_u32_be(static_cast<dp::u32>(msg.size()));
-            for (dp::usize i = 0; i < 4; i++) {
-                while (send_buffer_.push(length_bytes[i]).is_err()) {
+                if (poll_us < MAX_POLL_INTERVAL_US) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(poll_us));
+                    poll_us = std::min(poll_us * 2, MAX_POLL_INTERVAL_US);
+                } else {
                     std::this_thread::yield();
                 }
             }
 
-            // Write payload
-            for (dp::usize i = 0; i < msg.size(); i++) {
-                while (send_buffer_.push(msg[i]).is_err()) {
-                    std::this_thread::yield();
-                }
-            }
+            // Bulk copy message data
+            std::memcpy(data, msg.data(), msg.size());
+
+            // Set size and signal ready (with memory barriers)
+            header->msg_size.store(msg.size(), std::memory_order_release);
+            header->msg_ready.store(1, std::memory_order_release);
 
             echo::debug("sent ", msg.size(), " bytes");
             return dp::result::ok();
         }
 
-        /// Receive message with length-prefix framing
+        /// Receive message using bulk memcpy - FAST!
         dp::Res<Message> recv() override {
-            if (!connected_) {
+            if (!connected_ || !recv_shm_ptr_) {
                 echo::trace("recv called but not connected");
                 return dp::result::err(dp::Error::not_found("not connected"));
             }
 
             echo::trace("shm recv waiting");
 
+            auto *header = get_header(recv_shm_ptr_);
+            dp::u8 *data = get_data(recv_shm_ptr_);
+
             auto start_time = std::chrono::steady_clock::now();
-            dp::u32 poll_interval_us = POLL_INTERVAL_US;
+            dp::u32 poll_us = POLL_INTERVAL_US;
 
-            // Read length prefix
-            dp::Array<dp::u8, 4> length_bytes;
-            for (dp::usize i = 0; i < 4; i++) {
-                while (true) {
-                    auto res = recv_buffer_.pop();
-                    if (res.is_ok()) {
-                        length_bytes[i] = res.value();
-                        poll_interval_us = POLL_INTERVAL_US;
-                        break;
+            // Wait for message to be ready (msg_ready == 1)
+            while (header->msg_ready.load(std::memory_order_acquire) == 0) {
+                if (recv_timeout_ms_ > 0) {
+                    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                       std::chrono::steady_clock::now() - start_time)
+                                       .count();
+                    if (elapsed >= recv_timeout_ms_) {
+                        return dp::result::err(dp::Error::timeout("recv timeout"));
                     }
+                }
 
-                    if (recv_timeout_ms_ > 0) {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::steady_clock::now() - start_time)
-                                           .count();
-                        if (elapsed >= recv_timeout_ms_) {
-                            return dp::result::err(dp::Error::timeout("recv timeout"));
-                        }
-                    }
-
-                    std::this_thread::sleep_for(std::chrono::microseconds(poll_interval_us));
-                    if (poll_interval_us < 1000) {
-                        poll_interval_us = std::min(poll_interval_us * 2, 1000u);
-                    }
+                if (poll_us < MAX_POLL_INTERVAL_US) {
+                    std::this_thread::sleep_for(std::chrono::microseconds(poll_us));
+                    poll_us = std::min(poll_us * 2, MAX_POLL_INTERVAL_US);
+                } else {
+                    std::this_thread::yield();
                 }
             }
 
-            dp::u32 length = decode_u32_be(length_bytes.data());
+            // Read size
+            dp::u64 length = header->msg_size.load(std::memory_order_acquire);
             echo::trace("recv expecting ", length, " bytes");
 
             if (length > remote::MAX_MESSAGE_SIZE) {
@@ -522,39 +593,20 @@ namespace netpipe {
                 return dp::result::err(dp::Error::invalid_argument("message exceeds maximum size"));
             }
 
+            // Allocate and bulk copy
             Message msg;
             try {
-                msg.resize(length);
+                msg.resize(static_cast<dp::usize>(length));
             } catch (const std::bad_alloc &) {
                 echo::error("allocation failed: ", length, " bytes");
                 connected_ = false;
                 return dp::result::err(dp::Error::io_error("memory allocation failed"));
             }
 
-            for (dp::usize i = 0; i < length; i++) {
-                while (true) {
-                    auto res = recv_buffer_.pop();
-                    if (res.is_ok()) {
-                        msg[i] = res.value();
-                        poll_interval_us = POLL_INTERVAL_US;
-                        break;
-                    }
+            std::memcpy(msg.data(), data, static_cast<dp::usize>(length));
 
-                    if (recv_timeout_ms_ > 0) {
-                        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                           std::chrono::steady_clock::now() - start_time)
-                                           .count();
-                        if (elapsed >= recv_timeout_ms_) {
-                            return dp::result::err(dp::Error::timeout("recv timeout"));
-                        }
-                    }
-
-                    std::this_thread::sleep_for(std::chrono::microseconds(poll_interval_us));
-                    if (poll_interval_us < 1000) {
-                        poll_interval_us = std::min(poll_interval_us * 2, 1000u);
-                    }
-                }
-            }
+            // Signal buffer is free
+            header->msg_ready.store(0, std::memory_order_release);
 
             echo::debug("received ", length, " bytes");
             return dp::result::ok(std::move(msg));
@@ -571,17 +623,28 @@ namespace netpipe {
                 echo::trace("closing shm connection ", conn_id_);
                 connected_ = false;
 
-                // If we own the SHM (server-side accepted connection), unlink buffers
-                if (owns_shm_ && conn_id_ > 0) {
-                    char s2c_name[256];
-                    char c2s_name[256];
-                    snprintf(s2c_name, sizeof(s2c_name), "/%s_%llu_s2c", channel_name_.c_str(),
-                             static_cast<unsigned long long>(conn_id_));
-                    snprintf(c2s_name, sizeof(c2s_name), "/%s_%llu_c2s", channel_name_.c_str(),
-                             static_cast<unsigned long long>(conn_id_));
-                    ::shm_unlink(s2c_name);
-                    ::shm_unlink(c2s_name);
+                char s2c_name[256];
+                char c2s_name[256];
+                snprintf(s2c_name, sizeof(s2c_name), "/%s_%llu_s2c", channel_name_.c_str(),
+                         static_cast<unsigned long long>(conn_id_));
+                snprintf(c2s_name, sizeof(c2s_name), "/%s_%llu_c2s", channel_name_.c_str(),
+                         static_cast<unsigned long long>(conn_id_));
+
+                if (is_server_) {
+                    // Server owns s2c (send), client owns c2s
+                    close_msg_buffer(send_shm_ptr_, send_shm_size_, send_shm_fd_, owns_shm_ ? s2c_name : nullptr,
+                                     owns_shm_);
+                    close_msg_buffer(recv_shm_ptr_, recv_shm_size_, recv_shm_fd_, nullptr, false);
+                } else {
+                    // Client: just detach, don't unlink
+                    close_msg_buffer(send_shm_ptr_, send_shm_size_, send_shm_fd_, nullptr, false);
+                    close_msg_buffer(recv_shm_ptr_, recv_shm_size_, recv_shm_fd_, nullptr, false);
                 }
+
+                send_shm_ptr_ = nullptr;
+                recv_shm_ptr_ = nullptr;
+                send_shm_fd_ = -1;
+                recv_shm_fd_ = -1;
             }
 
             if (listening_) {
