@@ -80,13 +80,27 @@ namespace netpipe {
         dp::Res<void> connect(const TcpEndpoint &endpoint) override {
             echo::trace("connecting to ", endpoint.to_string());
 
-            // Create socket
-            fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+            // Resolve hostname (supports both IPv4 and IPv6)
+            struct addrinfo hints = {};
+            hints.ai_family = AF_UNSPEC; // Allow IPv4 or IPv6
+            hints.ai_socktype = SOCK_STREAM;
+
+            struct addrinfo *result = nullptr;
+            dp::String port_str(std::to_string(endpoint.port).c_str());
+            dp::i32 ret = ::getaddrinfo(endpoint.host.c_str(), port_str.c_str(), &hints, &result);
+            if (ret != 0) {
+                echo::error("getaddrinfo failed for ", endpoint.to_string(), ": ", gai_strerror(ret));
+                return dp::result::err(dp::Error::io_error("getaddrinfo failed"));
+            }
+
+            // Create socket with the resolved address family
+            fd_ = ::socket(result->ai_family, SOCK_STREAM, 0);
             if (fd_ < 0) {
+                ::freeaddrinfo(result);
                 echo::error("socket creation failed: ", strerror(errno));
                 return dp::result::err(dp::Error::io_error(dp::String("socket creation failed: ") + strerror(errno)));
             }
-            echo::trace("socket created fd=", fd_);
+            echo::trace("socket created fd=", fd_, " family=", result->ai_family == AF_INET6 ? "IPv6" : "IPv4");
 
             // Configure socket buffer sizes for large message RPC
             // Default to 16MB for both send and receive buffers
@@ -111,21 +125,6 @@ namespace netpipe {
                 socklen_t optlen = sizeof(rcvbuf);
                 ::getsockopt(fd_, SOL_SOCKET, SO_RCVBUF, &rcvbuf, &optlen);
                 echo::trace("SO_RCVBUF set to ", rcvbuf, " bytes (requested ", BUFFER_SIZE, ")");
-            }
-
-            // Resolve hostname
-            struct addrinfo hints = {};
-            hints.ai_family = AF_INET;
-            hints.ai_socktype = SOCK_STREAM;
-
-            struct addrinfo *result = nullptr;
-            dp::String port_str(std::to_string(endpoint.port).c_str());
-            dp::i32 ret = ::getaddrinfo(endpoint.host.c_str(), port_str.c_str(), &hints, &result);
-            if (ret != 0) {
-                ::close(fd_);
-                fd_ = -1;
-                echo::error("getaddrinfo failed for ", endpoint.to_string(), ": ", gai_strerror(ret));
-                return dp::result::err(dp::Error::io_error("getaddrinfo failed"));
             }
 
             // Try to connect
@@ -163,13 +162,18 @@ namespace netpipe {
         dp::Res<void> listen(const TcpEndpoint &endpoint) override {
             echo::trace("listening on ", endpoint.to_string());
 
+            // Determine address family based on endpoint
+            bool is_ipv6 = (endpoint.host.find(':') != dp::String::npos) || endpoint.host == "::";
+            bool is_any = endpoint.host == "0.0.0.0" || endpoint.host == "::" || endpoint.host.empty();
+            dp::i32 family = is_ipv6 ? AF_INET6 : AF_INET;
+
             // Create socket
-            fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+            fd_ = ::socket(family, SOCK_STREAM, 0);
             if (fd_ < 0) {
                 echo::error("socket creation failed: ", strerror(errno));
                 return dp::result::err(dp::Error::io_error(dp::String("socket creation failed: ") + strerror(errno)));
             }
-            echo::trace("socket created fd=", fd_);
+            echo::trace("socket created fd=", fd_, " family=", is_ipv6 ? "IPv6" : "IPv4");
 
             // Configure socket buffer sizes for large message RPC
             // Default to 16MB for both send and receive buffers
@@ -204,24 +208,47 @@ namespace netpipe {
             // Client connections inherit some settings but we also configure them in accept()
             configure_keepalive(fd_);
 
-            // Bind to address
-            struct sockaddr_in addr = {};
-            addr.sin_family = AF_INET;
-            addr.sin_port = htons(endpoint.port);
+            // Bind to address (IPv4 or IPv6)
+            struct sockaddr_storage addr_storage = {};
+            socklen_t addr_len;
 
-            if (endpoint.host == "0.0.0.0" || endpoint.host.empty()) {
-                addr.sin_addr.s_addr = INADDR_ANY;
+            if (is_ipv6) {
+                auto *addr6 = reinterpret_cast<struct sockaddr_in6 *>(&addr_storage);
+                addr6->sin6_family = AF_INET6;
+                addr6->sin6_port = htons(endpoint.port);
+                addr_len = sizeof(struct sockaddr_in6);
+
+                if (is_any) {
+                    addr6->sin6_addr = in6addr_any;
+                } else {
+                    if (::inet_pton(AF_INET6, endpoint.host.c_str(), &addr6->sin6_addr) <= 0) {
+                        ::close(fd_);
+                        fd_ = -1;
+                        echo::error("invalid IPv6 address: ", endpoint.host.c_str());
+                        return dp::result::err(
+                            dp::Error::invalid_argument(dp::String("invalid IPv6 address: ") + endpoint.host));
+                    }
+                }
             } else {
-                if (::inet_pton(AF_INET, endpoint.host.c_str(), &addr.sin_addr) <= 0) {
-                    ::close(fd_);
-                    fd_ = -1;
-                    echo::error("invalid address: ", endpoint.host.c_str());
-                    return dp::result::err(
-                        dp::Error::invalid_argument(dp::String("invalid IP address: ") + endpoint.host));
+                auto *addr4 = reinterpret_cast<struct sockaddr_in *>(&addr_storage);
+                addr4->sin_family = AF_INET;
+                addr4->sin_port = htons(endpoint.port);
+                addr_len = sizeof(struct sockaddr_in);
+
+                if (is_any) {
+                    addr4->sin_addr.s_addr = INADDR_ANY;
+                } else {
+                    if (::inet_pton(AF_INET, endpoint.host.c_str(), &addr4->sin_addr) <= 0) {
+                        ::close(fd_);
+                        fd_ = -1;
+                        echo::error("invalid IPv4 address: ", endpoint.host.c_str());
+                        return dp::result::err(
+                            dp::Error::invalid_argument(dp::String("invalid IPv4 address: ") + endpoint.host));
+                    }
                 }
             }
 
-            if (::bind(fd_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            if (::bind(fd_, reinterpret_cast<struct sockaddr *>(&addr_storage), addr_len) < 0) {
                 ::close(fd_);
                 fd_ = -1;
                 echo::error("bind failed on ", endpoint.to_string(), ": ", strerror(errno));
@@ -253,10 +280,10 @@ namespace netpipe {
 
             echo::trace("waiting for connection on fd=", fd_);
 
-            struct sockaddr_in client_addr = {};
+            struct sockaddr_storage client_addr = {};
             socklen_t client_len = sizeof(client_addr);
 
-            dp::i32 client_fd = ::accept(fd_, (struct sockaddr *)&client_addr, &client_len);
+            dp::i32 client_fd = ::accept(fd_, reinterpret_cast<struct sockaddr *>(&client_addr), &client_len);
             if (client_fd < 0) {
                 echo::error("accept failed on ", local_endpoint_.to_string(), ": ", strerror(errno));
                 return dp::result::err(dp::Error::io_error("accept failed"));
@@ -274,10 +301,19 @@ namespace netpipe {
             // Configure TCP keepalive for connection health monitoring
             configure_keepalive(client_fd);
 
-            // Get client address
-            char client_ip[INET_ADDRSTRLEN];
-            ::inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, sizeof(client_ip));
-            dp::u16 client_port = ntohs(client_addr.sin_port);
+            // Get client address (IPv4 or IPv6)
+            char client_ip[INET6_ADDRSTRLEN];
+            dp::u16 client_port;
+
+            if (client_addr.ss_family == AF_INET6) {
+                auto *addr6 = reinterpret_cast<struct sockaddr_in6 *>(&client_addr);
+                ::inet_ntop(AF_INET6, &addr6->sin6_addr, client_ip, sizeof(client_ip));
+                client_port = ntohs(addr6->sin6_port);
+            } else {
+                auto *addr4 = reinterpret_cast<struct sockaddr_in *>(&client_addr);
+                ::inet_ntop(AF_INET, &addr4->sin_addr, client_ip, sizeof(client_ip));
+                client_port = ntohs(addr4->sin_port);
+            }
 
             TcpEndpoint client_endpoint{dp::String(client_ip), client_port};
 
