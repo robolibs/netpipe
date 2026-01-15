@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.8] - 2026-01-15
+
+### <!-- 0 -->⛰️  Features
+
+- Add IPv6 support and receive timeouts
+
 ## [0.0.7] - 2026-01-09
 
 ### <!-- 1 -->🐛 Bug Fixes

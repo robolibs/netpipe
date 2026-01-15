@@ -29,6 +29,11 @@ namespace netpipe {
         // Returns the message and the source endpoint
         virtual dp::Res<dp::Pair<Message, UdpEndpoint>> recv_from() = 0;
 
+        // Set receive timeout in milliseconds
+        // 0 means no timeout (blocking forever)
+        // Returns error if timeout cannot be set
+        virtual dp::Res<void> set_recv_timeout(dp::u32 timeout_ms) = 0;
+
         // Close and release resources
         virtual void close() = 0;
     };
