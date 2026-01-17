@@ -17,6 +17,9 @@
 #include <netpipe/stream/shm.hpp>
 #include <netpipe/stream/tcp.hpp>
 
+// QUIC transport (UDP-based, multiplexed streams)
+#include <netpipe/quic.hpp>
+
 // Datagram implementations
 #include <netpipe/datagram/lora.hpp>
 #include <netpipe/datagram/udp.hpp>
@@ -34,6 +37,7 @@
 //   - netpipe::TcpEndpoint, UdpEndpoint, IpcEndpoint, ShmEndpoint, LoraEndpoint
 //   - netpipe::Stream (base class)
 //   - netpipe::TcpStream, IpcStream, ShmStream
+//   - netpipe::QuicEndpoint, QuicStream - QUIC transport over UDP
 //   - netpipe::Datagram (base class)
 //   - netpipe::UdpDatagram, LoraDatagram
 //   - netpipe::Remote<Unidirect> - Simple client-server RPC

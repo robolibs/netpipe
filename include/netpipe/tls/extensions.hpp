@@ -10,6 +10,8 @@ namespace netpipe::tls {
         ServerName = 0,
         SupportedGroups = 10,
         SignatureAlgorithms = 13,
+        PreSharedKey = 41,
+        EarlyData = 42,
         SupportedVersions = 43,
         Cookie = 44,
         PskKeyExchangeModes = 45,

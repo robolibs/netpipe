@@ -92,6 +92,13 @@ namespace netpipe::tls {
         dp::Vector<dp::u8> client_application_traffic_secret;
         dp::Vector<dp::u8> server_application_traffic_secret;
 
+        // 0-RTT / Early data secrets
+        dp::Vector<dp::u8> client_early_traffic_secret;
+        dp::Vector<dp::u8> early_exporter_master_secret;
+
+        // Resumption secrets
+        dp::Vector<dp::u8> resumption_master_secret;
+
         // Initialize with early secret (no PSK = zeros)
         void init() {
             echo::trace("KeySchedule::init");
@@ -110,6 +117,39 @@ namespace netpipe::tls {
 
             early_secret = dp::Vector<dp::u8>(result.data.begin(), result.data.end());
             echo::debug("Derived early_secret (", early_secret.size(), " bytes)");
+        }
+
+        // Initialize with a Pre-Shared Key (for session resumption / 0-RTT)
+        void init_with_psk(const dp::Vector<dp::u8> &psk) {
+            echo::trace("KeySchedule::init_with_psk");
+
+            std::vector<uint8_t> psk_std(psk.begin(), psk.end());
+            std::vector<uint8_t> empty_salt;
+
+            // Early Secret = HKDF-Extract(0, PSK)
+            auto result = keylock::hash::hkdf_extract(keylock::hash::Algorithm::SHA256, psk_std, empty_salt);
+
+            if (!result.success) {
+                echo::error("Failed to derive early secret with PSK: ", result.error_message.c_str());
+                return;
+            }
+
+            early_secret = dp::Vector<dp::u8>(result.data.begin(), result.data.end());
+            echo::debug("Derived early_secret from PSK (", early_secret.size(), " bytes)");
+        }
+
+        // Derive early (0-RTT) secrets from ClientHello
+        // transcript_hash should be Hash(ClientHello)
+        void derive_early_secrets(const dp::Vector<dp::u8> &client_hello_hash) {
+            echo::trace("KeySchedule::derive_early_secrets");
+
+            // Client Early Traffic Secret
+            client_early_traffic_secret = derive_secret(early_secret, "c e traffic", client_hello_hash);
+            echo::debug("Derived client_early_traffic_secret (", client_early_traffic_secret.size(), " bytes)");
+
+            // Early Exporter Master Secret
+            early_exporter_master_secret = derive_secret(early_secret, "e exp master", client_hello_hash);
+            echo::debug("Derived early_exporter_master_secret (", early_exporter_master_secret.size(), " bytes)");
         }
 
         // Derive handshake secrets from the ECDHE shared secret
@@ -175,6 +215,23 @@ namespace netpipe::tls {
             server_application_traffic_secret = derive_secret(master_secret, "s ap traffic", full_transcript_hash);
             echo::debug("Derived server_application_traffic_secret (", server_application_traffic_secret.size(),
                         " bytes)");
+        }
+
+        // Derive resumption master secret (for generating session tickets)
+        // transcript_hash should be Hash(ClientHello ... client Finished)
+        void derive_resumption_master_secret(const dp::Vector<dp::u8> &full_transcript_hash) {
+            echo::trace("KeySchedule::derive_resumption_master_secret");
+
+            resumption_master_secret = derive_secret(master_secret, "res master", full_transcript_hash);
+            echo::debug("Derived resumption_master_secret (", resumption_master_secret.size(), " bytes)");
+        }
+
+        // Derive PSK from resumption master secret and ticket nonce
+        // Used to create the PSK for session resumption
+        static dp::Vector<dp::u8> derive_resumption_psk(const dp::Vector<dp::u8> &resumption_master_secret,
+                                                        const dp::Vector<dp::u8> &ticket_nonce) {
+            echo::trace("KeySchedule::derive_resumption_psk");
+            return hkdf_expand_label(resumption_master_secret, "resumption", ticket_nonce, HASH_LENGTH);
         }
 
         // Derive traffic keys and IV from a traffic secret

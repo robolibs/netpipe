@@ -1,9 +1,11 @@
 #pragma once
 
+#include <chrono>
 #include <datapod/datapod.hpp>
 #include <echo/echo.hpp>
 #include <keylock/utils/common.hpp>
 #include <netpipe/tls/extensions.hpp>
+#include <netpipe/tls/key_schedule.hpp>
 
 namespace netpipe::tls {
 
@@ -582,6 +584,155 @@ namespace netpipe::tls {
             }
 
             return dp::Vector<dp::u8>(result.data.begin(), result.data.end());
+        }
+    };
+
+    // NewSessionTicket message (RFC 8446 Section 4.6.1)
+    // Sent by server after handshake to enable session resumption / 0-RTT
+    struct NewSessionTicket {
+        dp::u32 ticket_lifetime; // Seconds until ticket expires (max 604800 = 7 days)
+        dp::u32 ticket_age_add;  // Random value to obscure ticket age
+        dp::Vector<dp::u8> ticket_nonce;
+        dp::Vector<dp::u8> ticket;
+        dp::Vector<Extension> extensions;
+
+        dp::Vector<dp::u8> serialize_body() const {
+            dp::Vector<dp::u8> body;
+
+            // ticket_lifetime (4 bytes)
+            body.push_back(static_cast<dp::u8>((ticket_lifetime >> 24) & 0xFF));
+            body.push_back(static_cast<dp::u8>((ticket_lifetime >> 16) & 0xFF));
+            body.push_back(static_cast<dp::u8>((ticket_lifetime >> 8) & 0xFF));
+            body.push_back(static_cast<dp::u8>(ticket_lifetime & 0xFF));
+
+            // ticket_age_add (4 bytes)
+            body.push_back(static_cast<dp::u8>((ticket_age_add >> 24) & 0xFF));
+            body.push_back(static_cast<dp::u8>((ticket_age_add >> 16) & 0xFF));
+            body.push_back(static_cast<dp::u8>((ticket_age_add >> 8) & 0xFF));
+            body.push_back(static_cast<dp::u8>(ticket_age_add & 0xFF));
+
+            // ticket_nonce (1 byte length + data)
+            body.push_back(static_cast<dp::u8>(ticket_nonce.size()));
+            body.insert(body.end(), ticket_nonce.begin(), ticket_nonce.end());
+
+            // ticket (2 byte length + data)
+            body.push_back(static_cast<dp::u8>((ticket.size() >> 8) & 0xFF));
+            body.push_back(static_cast<dp::u8>(ticket.size() & 0xFF));
+            body.insert(body.end(), ticket.begin(), ticket.end());
+
+            // extensions (2 byte length + data)
+            dp::Vector<dp::u8> ext_data;
+            for (const auto &ext : extensions) {
+                auto ext_bytes = ext.serialize();
+                ext_data.insert(ext_data.end(), ext_bytes.begin(), ext_bytes.end());
+            }
+            body.push_back(static_cast<dp::u8>((ext_data.size() >> 8) & 0xFF));
+            body.push_back(static_cast<dp::u8>(ext_data.size() & 0xFF));
+            body.insert(body.end(), ext_data.begin(), ext_data.end());
+
+            return body;
+        }
+
+        dp::Vector<dp::u8> serialize() const {
+            auto body = serialize_body();
+            auto header = build_handshake_header(HandshakeType::NewSessionTicket, static_cast<dp::u32>(body.size()));
+            header.insert(header.end(), body.begin(), body.end());
+            return header;
+        }
+
+        static dp::Res<NewSessionTicket> parse(const dp::u8 *data, dp::usize size) {
+            echo::trace("NewSessionTicket::parse: size=", size);
+
+            if (size < 13) { // Minimum: 4 + 4 + 1 + 2 + 2
+                return dp::result::err(dp::Error::invalid_argument("NewSessionTicket too short"));
+            }
+
+            NewSessionTicket msg;
+            dp::usize offset = 0;
+
+            // ticket_lifetime
+            msg.ticket_lifetime = (static_cast<dp::u32>(data[0]) << 24) | (static_cast<dp::u32>(data[1]) << 16) |
+                                  (static_cast<dp::u32>(data[2]) << 8) | static_cast<dp::u32>(data[3]);
+            offset += 4;
+
+            // ticket_age_add
+            msg.ticket_age_add = (static_cast<dp::u32>(data[4]) << 24) | (static_cast<dp::u32>(data[5]) << 16) |
+                                 (static_cast<dp::u32>(data[6]) << 8) | static_cast<dp::u32>(data[7]);
+            offset += 4;
+
+            // ticket_nonce
+            dp::u8 nonce_len = data[offset++];
+            if (offset + nonce_len > size) {
+                return dp::result::err(dp::Error::invalid_argument("NewSessionTicket nonce truncated"));
+            }
+            msg.ticket_nonce = dp::Vector<dp::u8>(data + offset, data + offset + nonce_len);
+            offset += nonce_len;
+
+            // ticket
+            if (offset + 2 > size) {
+                return dp::result::err(dp::Error::invalid_argument("NewSessionTicket ticket length truncated"));
+            }
+            dp::u16 ticket_len = (static_cast<dp::u16>(data[offset]) << 8) | static_cast<dp::u16>(data[offset + 1]);
+            offset += 2;
+
+            if (offset + ticket_len > size) {
+                return dp::result::err(dp::Error::invalid_argument("NewSessionTicket ticket truncated"));
+            }
+            msg.ticket = dp::Vector<dp::u8>(data + offset, data + offset + ticket_len);
+            offset += ticket_len;
+
+            // extensions
+            if (offset + 2 > size) {
+                return dp::result::err(dp::Error::invalid_argument("NewSessionTicket extensions length truncated"));
+            }
+            dp::u16 ext_len = (static_cast<dp::u16>(data[offset]) << 8) | static_cast<dp::u16>(data[offset + 1]);
+            offset += 2;
+
+            if (offset + ext_len > size) {
+                return dp::result::err(dp::Error::invalid_argument("NewSessionTicket extensions truncated"));
+            }
+            // Parse extensions (if any)
+            // For now, we just skip them
+            offset += ext_len;
+
+            echo::debug("Parsed NewSessionTicket: lifetime=", msg.ticket_lifetime, " ticket_len=", msg.ticket.size());
+
+            return dp::result::ok(std::move(msg));
+        }
+    };
+
+    // Stored session ticket (for client-side storage)
+    struct SessionTicket {
+        dp::Vector<dp::u8> ticket;
+        dp::Vector<dp::u8> resumption_master_secret;
+        dp::u32 ticket_lifetime;
+        dp::u32 ticket_age_add;
+        dp::Vector<dp::u8> ticket_nonce;
+        dp::u16 cipher_suite;
+        dp::u64 timestamp_ms; // When the ticket was received
+
+        // Compute PSK from resumption master secret and ticket nonce
+        dp::Vector<dp::u8> compute_psk() const {
+            return KeySchedule::derive_resumption_psk(resumption_master_secret, ticket_nonce);
+        }
+
+        // Check if ticket is still valid
+        bool is_valid() const {
+            auto now_ms = static_cast<dp::u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                   std::chrono::steady_clock::now().time_since_epoch())
+                                                   .count());
+            auto elapsed_ms = now_ms - timestamp_ms;
+            auto lifetime_ms = static_cast<dp::u64>(ticket_lifetime) * 1000;
+            return elapsed_ms < lifetime_ms;
+        }
+
+        // Compute obfuscated ticket age for ClientHello
+        dp::u32 obfuscated_ticket_age() const {
+            auto now_ms = static_cast<dp::u64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                   std::chrono::steady_clock::now().time_since_epoch())
+                                                   .count());
+            auto age_ms = static_cast<dp::u32>(now_ms - timestamp_ms);
+            return age_ms + ticket_age_add;
         }
     };
 
