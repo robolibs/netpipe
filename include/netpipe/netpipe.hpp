@@ -5,31 +5,31 @@
 //                         Datagram (unreliable, connectionless)
 
 // Core types and utilities
-#include <netpipe/common.hpp>
-#include <netpipe/endpoint.hpp>
+#include <netpipe/core/common.hpp>
+#include <netpipe/core/endpoint.hpp>
 
 // Base classes
-#include <netpipe/datagram.hpp>
-#include <netpipe/stream.hpp>
+#include <netpipe/core/datagram.hpp>
+#include <netpipe/core/stream.hpp>
 
 // Stream implementations
-#include <netpipe/stream/ipc.hpp>
-#include <netpipe/stream/shm.hpp>
-#include <netpipe/stream/tcp.hpp>
+#include <netpipe/transport/stream/ipc.hpp>
+#include <netpipe/transport/stream/shm.hpp>
+#include <netpipe/transport/stream/tcp.hpp>
 
 // QUIC transport (UDP-based, multiplexed streams)
-#include <netpipe/quic.hpp>
+#include <netpipe/transport/stream/quic.hpp>
 
 // Datagram implementations
-#include <netpipe/datagram/lora.hpp>
-#include <netpipe/datagram/udp.hpp>
+#include <netpipe/transport/datagram/lora.hpp>
+#include <netpipe/transport/datagram/udp.hpp>
 
 // Higher-level protocols
-#include <netpipe/remote/async.hpp>
-#include <netpipe/remote/metrics.hpp>
-#include <netpipe/remote/remote.hpp>
-#include <netpipe/remote/serialization.hpp>
-#include <netpipe/remote/streaming.hpp>
+#include <netpipe/protocol/rpc.hpp>
+#include <netpipe/protocol/rpc/async.hpp>
+#include <netpipe/protocol/rpc/metrics.hpp>
+#include <netpipe/protocol/rpc/serialization.hpp>
+#include <netpipe/protocol/rpc/streaming.hpp>
 
 // All types are in the netpipe:: namespace
 // Available types:

@@ -8,7 +8,7 @@
 /// 4. Shows stream multiplexing capability
 
 #include <chrono>
-#include <netpipe/quic.hpp>
+#include <netpipe/transport/stream/quic.hpp>
 #include <thread>
 
 void run_server() {

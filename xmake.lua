@@ -11,7 +11,7 @@ local PROJECT_VERSION = "0.0.9"
 local LIB_DEPS = {
     {"echo", "https://github.com/bresilla/echo.git", "0.0.23"},
     {"datapod", "https://github.com/robolibs/datapod.git", "0.0.34"},
-    {"keylock", "https://github.com/robolibs/keylock.git", "0.0.6"},
+    {"keylock", "https://github.com/robolibs/keylock.git", "0.0.10"},
     "pkgconfig::libsodium",
 }
 local EXAMPLE_DEPS = {
@@ -47,7 +47,8 @@ local COMMON_FLAGS = {
     "-Wall", "-Wextra", "-Wpedantic",
     "-Wno-reorder", "-Wno-narrowing", "-Wno-array-bounds",
     "-Wno-unused-variable", "-Wno-unused-parameter",
-    "-Wno-unused-but-set-variable", "-Wno-gnu-line-marker", "-Wno-comment"
+    "-Wno-unused-but-set-variable", "-Wno-unused-result",
+    "-Wno-gnu-line-marker", "-Wno-comment"
 }
 
 -- Add common flags
