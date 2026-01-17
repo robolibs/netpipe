@@ -1,4 +1,4 @@
-#include <netpipe/stream/tcp.hpp>
+#include <netpipe/transport/stream/tcp.hpp>
 
 int main() {
     echo::info("TCP Echo Client starting...");

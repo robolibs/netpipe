@@ -1,5 +1,5 @@
 #include <doctest/doctest.h>
-#include <netpipe/common.hpp>
+#include <netpipe/core/common.hpp>
 
 TEST_CASE("encode_u32_be - Big-endian encoding") {
     SUBCASE("Zero value") {

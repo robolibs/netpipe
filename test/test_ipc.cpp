@@ -1,6 +1,6 @@
 #include <chrono>
 #include <doctest/doctest.h>
-#include <netpipe/stream/ipc.hpp>
+#include <netpipe/transport/stream/ipc.hpp>
 #include <thread>
 
 TEST_CASE("IpcStream - Basic connection") {

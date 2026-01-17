@@ -1,6 +1,6 @@
 #include <chrono>
 #include <doctest/doctest.h>
-#include <netpipe/datagram/udp.hpp>
+#include <netpipe/transport/datagram/udp.hpp>
 #include <thread>
 
 TEST_CASE("UdpDatagram - Basic send and receive") {

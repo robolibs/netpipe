@@ -1,13 +1,13 @@
 #include <chrono>
 #include <doctest/doctest.h>
-#include <netpipe/http3.hpp>
-#include <netpipe/quic.hpp>
-#include <netpipe/quic/ack_manager.hpp>
-#include <netpipe/quic/congestion_control.hpp>
-#include <netpipe/quic/flow_control.hpp>
-#include <netpipe/quic/loss_detection.hpp>
-#include <netpipe/quic/tls_adapter.hpp>
-#include <netpipe/tls/messages.hpp>
+#include <netpipe/protocol/http3.hpp>
+#include <netpipe/transport/stream/quic.hpp>
+#include <netpipe/transport/stream/quic/ack_manager.hpp>
+#include <netpipe/transport/stream/quic/congestion_control.hpp>
+#include <netpipe/transport/stream/quic/flow_control.hpp>
+#include <netpipe/transport/stream/quic/loss_detection.hpp>
+#include <netpipe/transport/stream/quic/tls_adapter.hpp>
+#include <netpipe/security/tls/messages.hpp>
 #include <thread>
 
 using namespace netpipe::quic;

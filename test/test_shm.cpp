@@ -1,6 +1,6 @@
 #include <chrono>
 #include <doctest/doctest.h>
-#include <netpipe/stream/shm.hpp>
+#include <netpipe/transport/stream/shm.hpp>
 #include <thread>
 
 TEST_CASE("ShmStream - Basic connection") {
