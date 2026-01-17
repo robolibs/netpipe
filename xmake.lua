@@ -12,6 +12,7 @@ local LIB_DEPS = {
     {"echo", "https://github.com/bresilla/echo.git", "0.0.23"},
     {"datapod", "https://github.com/robolibs/datapod.git", "0.0.34"},
     {"keylock", "https://github.com/robolibs/keylock.git", "0.0.6"},
+    "pkgconfig::libsodium",
 }
 local EXAMPLE_DEPS = {
     {system = "rerun_sdk"},

@@ -14,6 +14,7 @@ set(LIB_DEPS
     "echo|https://github.com/bresilla/echo.git|0.0.23"
     "datapod|https://github.com/robolibs/datapod.git|0.0.34"
     "keylock|https://github.com/robolibs/keylock.git|0.0.6"
+    "pkg::libsodium"
 )
 set(EXAMPLE_DEPS
     "wirebit|https://github.com/robolibs/wirebit.git|0.0.9"
