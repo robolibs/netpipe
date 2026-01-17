@@ -26,14 +26,20 @@ See [TODO.md](./TODO.md) for the complete development plan and current progress.
 │                              NETPIPE                                     │
 ├──────────────────────┬──────────────────────┬───────────────────────────┤
 │   Remote RPC Layer   │                      │                           │
-│  ┌────────────────┐  │                      │                           │
-│  │ RemoteRouter   │  │  Stream Family       │   Datagram Family         │
-│  │ RemoteAsync    │  │  (Reliable)          │   (Unreliable)            │
-│  │ RemotePeer     │  │                      │                           │
-│  │ Streaming      │  │  ┌──────────────┐    │   ┌──────────────┐        │
-│  │ TypedRemote    │  │  │  TcpStream   │    │   │ UdpDatagram  │        │
-│  │ Metrics        │  │  │  IpcStream   │    │   │ LoraDatagram │        │
-│  └────────────────┘  │  │  ShmStream   │    │   └──────────────┘        │
+│  ┌────────────────┐  │  Stream Family       │   Datagram Family         │
+│  │ RemoteRouter   │  │  (Reliable)          │   (Unreliable)            │
+│  │ RemoteAsync    │  │                      │                           │
+│  │ RemotePeer     │  │  ┌──────────────┐    │   ┌──────────────┐        │
+│  │ Streaming      │  │  │  TcpStream   │    │   │ UdpDatagram  │        │
+│  │ TypedRemote    │  │  │  IpcStream   │    │   │ LoraDatagram │        │
+│  │ Metrics        │  │  │  ShmStream   │    │   └──────────────┘        │
+│  └────────────────┘  │  └──────────────┘    │                           │
+│                      │         │            │                           │
+├──────────────────────┼─────────▼────────────┼───────────────────────────┤
+│                      │  ┌──────────────┐    │                           │
+│   TLS 1.3 Layer      │  │ tls::Session │    │  (Encryption optional)    │
+│   (Optional)         │  │ X25519+Ed25519│   │                           │
+│                      │  │ ChaCha20/AES │    │                           │
 │                      │  └──────────────┘    │                           │
 └──────────────────────┴──────────────────────┴───────────────────────────┘
            │                      │                        │
@@ -46,10 +52,11 @@ See [TODO.md](./TODO.md) for the complete development plan and current progress.
 
 **Transport Characteristics:**
 ```
-TcpStream:   Network, reliable, ordered, connection-oriented
-IpcStream:   Local, reliable, ordered, Unix domain sockets
-ShmStream:   Local, reliable, ordered, zero-copy, lock-free ring buffer
-UdpDatagram: Network, unreliable, connectionless, broadcast support
+TcpStream:    Network, reliable, ordered, connection-oriented
+TcpStream+TLS: Network, reliable, ordered, encrypted (TLS 1.3)
+IpcStream:    Local, reliable, ordered, Unix domain sockets
+ShmStream:    Local, reliable, ordered, zero-copy, lock-free ring buffer
+UdpDatagram:  Network, unreliable, connectionless, broadcast support
 LoraDatagram: Long-range, unreliable, mesh networking, low bandwidth
 ```
 
@@ -67,6 +74,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(netpipe)
 
 target_link_libraries(your_target PRIVATE netpipe)
+```
+
+**Note:** For TLS support, you also need libsodium:
+```cmake
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(SODIUM REQUIRED libsodium)
+target_link_libraries(your_target PRIVATE ${SODIUM_LIBRARIES})
 ```
 
 ### Recommended: XMake
@@ -117,6 +131,56 @@ stream.connect({"127.0.0.1", 7447});
 netpipe::Message msg = {0x48, 0x65, 0x6c, 0x6c, 0x6f}; // "Hello"
 stream.send(msg);
 auto echo = stream.recv().value();
+```
+
+### TLS over TCP (Encrypted)
+
+```cpp
+#include <netpipe/netpipe.hpp>
+#include <netpipe/tls.hpp>
+#include <keylock/cert/builder.hpp>
+
+// Generate self-signed certificate (or load from file)
+keylock::crypto::Context crypto(keylock::crypto::Context::Algorithm::Ed25519);
+auto keypair = crypto.generate_keypair();
+
+keylock::cert::CertificateBuilder builder;
+builder.set_subject({{"CN", "localhost"}})
+       .set_validity_days(365)
+       .set_key_usage(keylock::cert::KeyUsageExtension::DigitalSignature);
+auto cert_der = builder.build(keypair).value();
+
+// Server
+netpipe::TcpStream tcp_server;
+tcp_server.listen({"0.0.0.0", 8443});
+auto tcp_client = tcp_server.accept().value();
+
+netpipe::tls::SessionConfig server_config;
+server_config.certificate = dp::Vector<dp::u8>(cert_der.begin(), cert_der.end());
+server_config.private_key = dp::Vector<dp::u8>(keypair.private_key.begin(), keypair.private_key.end());
+
+netpipe::tls::Session tls_session(server_config);
+tls_session.handshake_server(*tcp_client).unwrap();
+
+// Send/receive encrypted data
+tls_session.send(*tcp_client, {0x48, 0x65, 0x6c, 0x6c, 0x6f}); // "Hello"
+auto msg = tls_session.recv(*tcp_client).value();
+
+// Client
+netpipe::TcpStream tcp_client;
+tcp_client.connect({"127.0.0.1", 8443});
+
+netpipe::tls::SessionConfig client_config;
+client_config.skip_cert_verification = true; // For self-signed certs only!
+
+netpipe::tls::Session tls_session(client_config);
+tls_session.handshake_client(tcp_client).unwrap();
+
+tls_session.send(tcp_client, {0x48, 0x69}); // "Hi"
+auto response = tls_session.recv(tcp_client).value();
+
+// Clean close
+tls_session.close(tcp_client);
 ```
 
 ### IPC Stream (Unix Domain Sockets)
@@ -320,6 +384,14 @@ while (true) {
   - **IpcStream** - Unix domain sockets for local IPC
   - **ShmStream** - Zero-copy shared memory with lock-free ring buffer
 
+- **TLS 1.3 Encryption**
+  - **Session** - TLS 1.3 handshake and encrypted data transfer
+  - **ChaCha20-Poly1305** - Default cipher (software, fast on all platforms)
+  - **AES-256-GCM** - Hardware-accelerated when available
+  - **X25519** - Key exchange
+  - **Ed25519** - Certificate signatures
+  - **Certificate verification** - Hostname matching, validity checks
+
 - **Datagram Transports**
   - **UdpDatagram** - UDP with broadcast support
   - **LoraDatagram** - LoRa mesh via melodi serial protocol
@@ -367,6 +439,7 @@ BUILD_SYSTEM=zig make build     # Use Zig
 
 The `examples/` directory contains:
 - **tcp_echo_server.cpp** / **tcp_echo_client.cpp** - Basic TCP echo
+- **example_tls.cpp** - TLS 1.3 encrypted client/server
 - **udp_broadcast.cpp** - UDP broadcast sender/receiver
 - **rpc_example.cpp** - Remote client/server with routing
 - **ethernet_tunnel.cpp** - Wirebit Ethernet L2 tunneling (simulation)
@@ -378,6 +451,9 @@ The `examples/` directory contains:
 ```bash
 ./build/linux/x86_64/release/tcp_echo_server
 ./build/linux/x86_64/release/tcp_echo_client
+
+# TLS encrypted communication
+./build/linux/x86_64/release/example_tls
 
 ./build/linux/x86_64/release/udp_broadcast
 
