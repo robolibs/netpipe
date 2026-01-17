@@ -8,7 +8,10 @@
     "arrow-cpp@latest",
     "rerun@latest",
     "zig@latest",
-    "xmake@latest"
+    "xmake@latest",
+    "gcc@13.3.0",
+    "libsodium@latest",
+    "libsodium.dev"
   ],
   "shell": {
     "init_hook": [

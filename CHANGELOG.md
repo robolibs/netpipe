@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.9] - 2026-01-17
+
+### <!-- 0 -->⛰️  Features
+
+- Implement TLS 1.3 handshake and record layer
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Improve certificate verification and cipher suite selection
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Update dependencies and development environment
+
 ## [0.0.8] - 2026-01-15
 
 ### <!-- 0 -->⛰️  Features
