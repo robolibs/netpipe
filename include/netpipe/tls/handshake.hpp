@@ -2,6 +2,8 @@
 
 #include <datapod/datapod.hpp>
 #include <echo/echo.hpp>
+#include <keylock/cert/certificate.hpp>
+#include <keylock/cert/parser.hpp>
 #include <keylock/crypto/context.hpp>
 #include <keylock/utils/common.hpp>
 #include <netpipe/tls/extensions.hpp>
@@ -51,8 +53,14 @@ namespace netpipe::tls {
         // Server name (for SNI, client only)
         dp::String server_name;
 
-        // Skip certificate verification (for testing)
+        // Skip certificate verification (for testing only - INSECURE!)
         bool skip_cert_verification = false;
+
+        // Trusted CA certificates (DER-encoded) - for certificate chain validation
+        dp::Vector<dp::Vector<dp::u8>> trusted_cas;
+
+        // Expected server hostname (for certificate hostname validation)
+        dp::String expected_hostname;
     };
 
     // Handshake context - all state for an in-progress handshake
@@ -97,8 +105,12 @@ namespace netpipe::tls {
             auto session_id = keylock::utils::Common::generate_random_bytes(32);
             ch.legacy_session_id = dp::Vector<dp::u8>(session_id.begin(), session_id.end());
 
-            // Cipher suites (ChaCha20-Poly1305 only for now)
-            ch.cipher_suites = {TLS_CHACHA20_POLY1305_SHA256};
+            // Cipher suites - prefer AES-GCM if hardware supports it, otherwise ChaCha20
+            if (crypto_aead_aes256gcm_is_available()) {
+                ch.cipher_suites = {TLS_AES_256_GCM_SHA384, TLS_CHACHA20_POLY1305_SHA256};
+            } else {
+                ch.cipher_suites = {TLS_CHACHA20_POLY1305_SHA256};
+            }
 
             // Build extensions
             // 1. supported_versions (TLS 1.3)
@@ -203,6 +215,9 @@ namespace netpipe::tls {
             // Derive handshake secrets
             auto hello_hash = transcript_hash(transcript_);
             key_schedule_.derive_handshake_secrets(shared_secret, hello_hash);
+
+            // Configure record layer cipher suite
+            record_.set_cipher_suite(selected_cipher_suite_);
 
             // Set up record layer for encrypted handshake
             record_.set_read_traffic_secret(key_schedule_.server_handshake_traffic_secret);
@@ -415,13 +430,31 @@ namespace netpipe::tls {
             auto &ch = ch_result.value();
             client_random_ = dp::Vector<dp::u8>(ch.random.begin(), ch.random.end());
 
-            // Find supported cipher suite
+            // Find supported cipher suite (prefer AES-GCM if available, then ChaCha20)
             bool found_cipher = false;
-            for (auto cs : ch.cipher_suites) {
-                if (cs == TLS_CHACHA20_POLY1305_SHA256) {
-                    selected_cipher_suite_ = cs;
-                    found_cipher = true;
-                    break;
+            bool aes_available = crypto_aead_aes256gcm_is_available();
+
+            // First pass: look for AES-GCM if hardware supports it
+            if (aes_available) {
+                for (auto cs : ch.cipher_suites) {
+                    if (cs == TLS_AES_256_GCM_SHA384 || cs == TLS_AES_128_GCM_SHA256) {
+                        selected_cipher_suite_ = cs;
+                        found_cipher = true;
+                        echo::debug("Selected AES-GCM cipher suite");
+                        break;
+                    }
+                }
+            }
+
+            // Second pass: look for ChaCha20-Poly1305
+            if (!found_cipher) {
+                for (auto cs : ch.cipher_suites) {
+                    if (cs == TLS_CHACHA20_POLY1305_SHA256) {
+                        selected_cipher_suite_ = cs;
+                        found_cipher = true;
+                        echo::debug("Selected ChaCha20-Poly1305 cipher suite");
+                        break;
+                    }
                 }
             }
 
@@ -483,6 +516,9 @@ namespace netpipe::tls {
 
             auto hello_hash = transcript_hash(transcript_);
             key_schedule_.derive_handshake_secrets(shared_secret, hello_hash);
+
+            // Configure record layer cipher suite
+            record_.set_cipher_suite(selected_cipher_suite_);
 
             // Set up record layer for encrypted messages
             record_.set_read_traffic_secret(key_schedule_.client_handshake_traffic_secret);
@@ -755,12 +791,77 @@ namespace netpipe::tls {
                 return dp::result::err(dp::Error::invalid_argument("no peer certificate"));
             }
 
-            // Extract public key from certificate
-            // For now, we'll skip actual certificate parsing and trust the signature
-            // TODO: Use keylock certificate parsing to extract Ed25519 public key
+            // Parse the peer's certificate to extract the public key
+            auto &cert_der = peer_certificate_.certificate_list[0].cert_data;
+            std::vector<uint8_t> cert_der_std(cert_der.begin(), cert_der.end());
 
-            echo::warn("Certificate verification not fully implemented - signature not verified");
+            auto parse_result = keylock::cert::Certificate::parse(cert_der_std);
+            if (!parse_result.success) {
+                echo::error("Failed to parse peer certificate: ", parse_result.error.c_str());
+                return dp::result::err(dp::Error::invalid_argument("failed to parse peer certificate"));
+            }
 
+            auto &cert = parse_result.value;
+
+            // Validate certificate time if not skipping verification
+            if (!config_.skip_cert_verification && !cert.check_validity()) {
+                echo::error("Peer certificate is expired or not yet valid");
+                return dp::result::err(dp::Error::invalid_argument("peer certificate validity check failed"));
+            }
+
+            // Validate hostname if configured (for client verifying server)
+            if (!config_.skip_cert_verification && !config_.expected_hostname.empty() && is_server) {
+                std::string hostname(config_.expected_hostname.c_str());
+                if (!cert.match_hostname(hostname)) {
+                    echo::error("Certificate hostname mismatch: expected ", hostname.c_str());
+                    return dp::result::err(dp::Error::invalid_argument("certificate hostname mismatch"));
+                }
+            }
+
+            // Extract the public key from the certificate
+            auto public_key_der = cert.public_key_der();
+            if (public_key_der.empty()) {
+                return dp::result::err(dp::Error::invalid_argument("failed to extract public key from certificate"));
+            }
+
+            // For Ed25519, the public key is 32 bytes
+            // The DER format includes algorithm identifier, so we need to extract the raw key
+            // Ed25519 public key in SubjectPublicKeyInfo is: SEQUENCE { algorithm, BIT STRING { key } }
+            // The raw key should be the last 32 bytes if it's Ed25519
+            dp::Vector<dp::u8> public_key;
+            if (public_key_der.size() >= 32) {
+                // Try to extract Ed25519 public key (last 32 bytes for simple case)
+                // For proper parsing, we'd need full ASN.1 parsing
+                public_key = dp::Vector<dp::u8>(public_key_der.end() - 32, public_key_der.end());
+            } else {
+                return dp::result::err(dp::Error::invalid_argument("public key too short for Ed25519"));
+            }
+
+            // Build the content that was signed
+            auto hash = transcript_hash(transcript_);
+            auto signed_content = CertificateVerify::build_signed_content(is_server, hash);
+
+            // Verify the signature using Ed25519
+            std::vector<uint8_t> content_std(signed_content.begin(), signed_content.end());
+            std::vector<uint8_t> signature_std(cv.signature.begin(), cv.signature.end());
+            std::vector<uint8_t> pubkey_std(public_key.begin(), public_key.end());
+
+            keylock::crypto::Context crypto(keylock::crypto::Context::Algorithm::Ed25519);
+            auto verify_result = crypto.verify(content_std, signature_std, pubkey_std);
+
+            if (!verify_result.success) {
+                echo::error("CertificateVerify signature verification failed");
+                return dp::result::err(dp::Error::invalid_argument("signature verification failed"));
+            }
+
+            // Check if verification passed (verify returns data with success=true if valid)
+            // The verify function returns success=true and data[0]=1 if signature is valid
+            if (verify_result.data.empty() || verify_result.data[0] != 1) {
+                echo::error("CertificateVerify signature is invalid");
+                return dp::result::err(dp::Error::invalid_argument("invalid signature"));
+            }
+
+            echo::info("CertificateVerify signature verified successfully");
             return dp::result::ok();
         }
 

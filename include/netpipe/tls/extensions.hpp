@@ -230,7 +230,7 @@ namespace netpipe::tls {
                 return dp::result::err(dp::Error::invalid_argument("key_share extension too short"));
             }
 
-            dp::u16 list_length = (static_cast<dp::u16>(data[0]) << 8) | data[1];
+            dp::usize list_length = (static_cast<dp::u16>(data[0]) << 8) | data[1];
             if (data.size() < 2 + list_length) {
                 return dp::result::err(dp::Error::invalid_argument("key_share extension data truncated"));
             }
@@ -297,7 +297,7 @@ namespace netpipe::tls {
                 return dp::result::err(dp::Error::invalid_argument("supported_groups extension too short"));
             }
 
-            dp::u16 list_length = (static_cast<dp::u16>(data[0]) << 8) | data[1];
+            dp::usize list_length = (static_cast<dp::u16>(data[0]) << 8) | data[1];
             if (data.size() < 2 + list_length || list_length % 2 != 0) {
                 return dp::result::err(dp::Error::invalid_argument("supported_groups extension malformed"));
             }
@@ -339,7 +339,7 @@ namespace netpipe::tls {
                 return dp::result::err(dp::Error::invalid_argument("signature_algorithms extension too short"));
             }
 
-            dp::u16 list_length = (static_cast<dp::u16>(data[0]) << 8) | data[1];
+            dp::usize list_length = (static_cast<dp::u16>(data[0]) << 8) | data[1];
             if (data.size() < 2 + list_length || list_length % 2 != 0) {
                 return dp::result::err(dp::Error::invalid_argument("signature_algorithms extension malformed"));
             }
@@ -381,7 +381,7 @@ namespace netpipe::tls {
             return dp::result::err(dp::Error::invalid_argument("extensions list too short"));
         }
 
-        dp::u16 ext_length = (static_cast<dp::u16>(data[0]) << 8) | data[1];
+        dp::usize ext_length = (static_cast<dp::u16>(data[0]) << 8) | data[1];
         if (size < 2 + ext_length) {
             return dp::result::err(dp::Error::invalid_argument("extensions data truncated"));
         }

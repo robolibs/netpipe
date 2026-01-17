@@ -3,6 +3,7 @@
 #include <datapod/datapod.hpp>
 #include <echo/echo.hpp>
 #include <netpipe/stream.hpp>
+#include <netpipe/tls/alert.hpp>
 #include <netpipe/tls/handshake.hpp>
 #include <netpipe/tls/record.hpp>
 
@@ -199,6 +200,14 @@ namespace netpipe::tls {
         // Check if session is established
         bool is_established() const { return established_; }
 
+        // Check if key update is recommended (sequence numbers getting high)
+        bool needs_key_update() const {
+            if (!established_ || !handshake_) {
+                return false;
+            }
+            return handshake_->record_layer().needs_key_update();
+        }
+
         // Send encrypted application data
         dp::Res<void> send(Stream &stream, const dp::Vector<dp::u8> &data) {
             if (!established_) {
@@ -239,7 +248,20 @@ namespace netpipe::tls {
             auto [content_type, plaintext] = decrypt_result.value();
 
             if (content_type == ContentType::Alert) {
-                echo::warn("Received TLS alert");
+                // Parse the alert for better error reporting
+                if (plaintext.size() >= 2) {
+                    auto alert_result = Alert::parse(plaintext);
+                    if (alert_result.is_ok()) {
+                        auto &alert = alert_result.value();
+                        echo::warn("Received TLS alert: ", alert.to_string());
+                        if (alert.is_close_notify()) {
+                            established_ = false;
+                            return dp::result::err(dp::Error::not_found("connection closed by peer"));
+                        }
+                        return dp::result::err(TlsError(alert).to_error());
+                    }
+                }
+                echo::warn("Received malformed TLS alert");
                 return dp::result::err(dp::Error::io_error("TLS alert received"));
             }
 

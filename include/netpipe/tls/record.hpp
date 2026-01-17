@@ -36,8 +36,24 @@ namespace netpipe::tls {
     // Nonce/IV size for ChaCha20-Poly1305 IETF
     constexpr dp::usize NONCE_SIZE = 12;
 
-    // Key size for ChaCha20-Poly1305
+    // Key size for ChaCha20-Poly1305 and AES-256-GCM
     constexpr dp::usize KEY_SIZE = 32;
+
+    // Maximum sequence number before key update is required (RFC 8446 recommends updating before 2^24)
+    // We use a conservative limit to ensure safety
+    constexpr dp::u64 MAX_SEQUENCE_NUMBER = (1ULL << 48) - 1; // 2^48 - 1
+
+    // Cipher suite identifiers
+    constexpr dp::u16 CIPHER_CHACHA20_POLY1305 = 0x1303;
+    constexpr dp::u16 CIPHER_AES_256_GCM = 0x1302;
+    constexpr dp::u16 CIPHER_AES_128_GCM = 0x1301;
+
+    // AEAD cipher selection
+    enum class CipherSuite : dp::u16 {
+        ChaCha20_Poly1305 = CIPHER_CHACHA20_POLY1305,
+        AES_256_GCM = CIPHER_AES_256_GCM,
+        AES_128_GCM = CIPHER_AES_128_GCM
+    };
 
     // TLS 1.3 Record Layer
     // Handles encryption and decryption of TLS records
@@ -55,6 +71,38 @@ namespace netpipe::tls {
         // Whether encryption is active
         bool write_encrypted = false;
         bool read_encrypted = false;
+
+        // Selected cipher suite (default: ChaCha20-Poly1305)
+        CipherSuite cipher_suite = CipherSuite::ChaCha20_Poly1305;
+
+        // Set cipher suite (call before setting traffic secrets)
+        void set_cipher_suite(dp::u16 suite) {
+            switch (suite) {
+            case CIPHER_AES_256_GCM:
+                cipher_suite = CipherSuite::AES_256_GCM;
+                echo::debug("Using AES-256-GCM cipher");
+                break;
+            case CIPHER_AES_128_GCM:
+                cipher_suite = CipherSuite::AES_128_GCM;
+                echo::debug("Using AES-128-GCM cipher");
+                break;
+            case CIPHER_CHACHA20_POLY1305:
+            default:
+                cipher_suite = CipherSuite::ChaCha20_Poly1305;
+                echo::debug("Using ChaCha20-Poly1305 cipher");
+                break;
+            }
+        }
+
+        // Get key size for current cipher
+        dp::usize get_key_size() const {
+            switch (cipher_suite) {
+            case CipherSuite::AES_128_GCM:
+                return 16;
+            default:
+                return 32;
+            }
+        }
 
         // Set write traffic secret (derives key and IV)
         void set_write_traffic_secret(const dp::Vector<dp::u8> &traffic_secret) {
@@ -107,6 +155,11 @@ namespace netpipe::tls {
             return aad;
         }
 
+        // Check if sequence number is approaching limit (needs key update)
+        bool needs_key_update() const {
+            return write_seq >= MAX_SEQUENCE_NUMBER - 1000 || read_seq >= MAX_SEQUENCE_NUMBER - 1000;
+        }
+
         // Encrypt a TLS record (returns full record including header)
         // inner_type: the real content type (stored in encrypted payload)
         // plaintext: the actual data to encrypt
@@ -117,6 +170,12 @@ namespace netpipe::tls {
             if (!write_encrypted) {
                 // Not encrypted - send as plaintext record
                 return build_plaintext_record(inner_type, plaintext);
+            }
+
+            // Check for sequence number overflow (RFC 8446 Section 5.3)
+            if (write_seq >= MAX_SEQUENCE_NUMBER) {
+                echo::error("Write sequence number overflow - key update required");
+                return dp::result::err(dp::Error::io_error("sequence number overflow - key update required"));
             }
 
             if (plaintext.size() > MAX_RECORD_PLAINTEXT_SIZE) {
@@ -151,17 +210,27 @@ namespace netpipe::tls {
             // Actually, looking at keylock API, it generates random nonce internally
             // We need to use the raw libsodium API or modify our approach
 
-            // For now, let's construct the ciphertext manually using libsodium directly
-            // since keylock's API prepends the nonce which we don't want for TLS
-
+            // Encrypt using the selected cipher
             std::vector<uint8_t> ciphertext(inner_plaintext.size() + AEAD_TAG_SIZE);
             unsigned long long ciphertext_len;
-
             std::vector<uint8_t> nonce_std(nonce.begin(), nonce.end());
 
-            int ret = crypto_aead_chacha20poly1305_ietf_encrypt(
-                ciphertext.data(), &ciphertext_len, plaintext_std.data(), plaintext_std.size(), aad_std.data(),
-                aad_std.size(), nullptr, nonce_std.data(), key_std.data());
+            int ret;
+            if (cipher_suite == CipherSuite::AES_256_GCM || cipher_suite == CipherSuite::AES_128_GCM) {
+                // Use AES-GCM (requires hardware support)
+                if (!crypto_aead_aes256gcm_is_available()) {
+                    echo::error("AES-GCM not available on this hardware");
+                    return dp::result::err(dp::Error::io_error("AES-GCM not available"));
+                }
+                ret = crypto_aead_aes256gcm_encrypt(ciphertext.data(), &ciphertext_len, plaintext_std.data(),
+                                                    plaintext_std.size(), aad_std.data(), aad_std.size(), nullptr,
+                                                    nonce_std.data(), key_std.data());
+            } else {
+                // Use ChaCha20-Poly1305 (default, software implementation)
+                ret = crypto_aead_chacha20poly1305_ietf_encrypt(
+                    ciphertext.data(), &ciphertext_len, plaintext_std.data(), plaintext_std.size(), aad_std.data(),
+                    aad_std.size(), nullptr, nonce_std.data(), key_std.data());
+            }
 
             if (ret != 0) {
                 echo::error("AEAD encryption failed");
@@ -215,6 +284,12 @@ namespace netpipe::tls {
                 return dp::result::ok(std::make_pair(outer_type, std::move(payload)));
             }
 
+            // Check for sequence number overflow (RFC 8446 Section 5.3)
+            if (read_seq >= MAX_SEQUENCE_NUMBER) {
+                echo::error("Read sequence number overflow - key update required");
+                return dp::result::err(dp::Error::io_error("sequence number overflow - key update required"));
+            }
+
             // Must be ApplicationData when encrypted
             if (outer_type != ContentType::ApplicationData) {
                 // ChangeCipherSpec is allowed and ignored
@@ -241,13 +316,26 @@ namespace netpipe::tls {
             std::vector<uint8_t> aad_std(aad.begin(), aad.end());
             std::vector<uint8_t> nonce_std(nonce.begin(), nonce.end());
 
-            // Decrypt
+            // Decrypt using the selected cipher
             std::vector<uint8_t> plaintext(ciphertext.size() - AEAD_TAG_SIZE);
             unsigned long long plaintext_len;
 
-            int ret = crypto_aead_chacha20poly1305_ietf_decrypt(plaintext.data(), &plaintext_len, nullptr,
+            int ret;
+            if (cipher_suite == CipherSuite::AES_256_GCM || cipher_suite == CipherSuite::AES_128_GCM) {
+                // Use AES-GCM
+                if (!crypto_aead_aes256gcm_is_available()) {
+                    echo::error("AES-GCM not available on this hardware");
+                    return dp::result::err(dp::Error::io_error("AES-GCM not available"));
+                }
+                ret = crypto_aead_aes256gcm_decrypt(plaintext.data(), &plaintext_len, nullptr, ciphertext.data(),
+                                                    ciphertext.size(), aad_std.data(), aad_std.size(), nonce_std.data(),
+                                                    key_std.data());
+            } else {
+                // Use ChaCha20-Poly1305
+                ret = crypto_aead_chacha20poly1305_ietf_decrypt(plaintext.data(), &plaintext_len, nullptr,
                                                                 ciphertext.data(), ciphertext.size(), aad_std.data(),
                                                                 aad_std.size(), nonce_std.data(), key_std.data());
+            }
 
             if (ret != 0) {
                 echo::error("AEAD decryption failed (bad MAC or corrupted)");

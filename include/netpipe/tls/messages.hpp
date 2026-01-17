@@ -503,7 +503,7 @@ namespace netpipe::tls {
             msg.algorithm = static_cast<SignatureScheme>((static_cast<dp::u16>(data[0]) << 8) | data[1]);
 
             // Signature length
-            dp::u16 sig_len = (static_cast<dp::u16>(data[2]) << 8) | data[3];
+            dp::usize sig_len = (static_cast<dp::u16>(data[2]) << 8) | data[3];
 
             if (size < 4 + sig_len) {
                 return dp::result::err(dp::Error::invalid_argument("CertificateVerify signature truncated"));
