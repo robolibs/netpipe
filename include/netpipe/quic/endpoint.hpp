@@ -119,6 +119,11 @@ namespace netpipe::quic {
         // Remote endpoint (for client)
         UdpEndpoint remote_endpoint_;
 
+        // NAT rebinding detection
+        UdpEndpoint last_peer_address_;       // Last known peer address
+        bool nat_rebinding_detected_ = false; // Flag for NAT rebinding
+        bool path_validation_pending_ = false; // Waiting for path validation
+
         // Receive timeout
         dp::u32 recv_timeout_ms_ = 0;
 
@@ -255,7 +260,53 @@ namespace netpipe::quic {
                 if (!client_conn_) {
                     return dp::result::err(dp::Error::invalid_argument("no client connection"));
                 }
-                return client_conn_->process_packet(data);
+
+                // NAT rebinding detection: check if packet came from different address
+                if (client_conn_->is_connected() && !last_peer_address_.host.empty()) {
+                    if (from.host != last_peer_address_.host || from.port != last_peer_address_.port) {
+                        echo::warn("NAT rebinding detected: ", last_peer_address_.to_string(), " -> ", from.to_string());
+                        nat_rebinding_detected_ = true;
+
+                        // Initiate path validation for new address
+                        if (!path_validation_pending_) {
+                            auto challenge_result = client_conn_->build_path_challenge_packet();
+                            if (challenge_result.is_ok()) {
+                                udp_.send_to(challenge_result.value(), from);
+                                path_validation_pending_ = true;
+                                echo::debug("Sent PATH_CHALLENGE to new address");
+                            }
+                        }
+                    }
+                }
+
+                // Update last known peer address
+                last_peer_address_ = from;
+
+                // Process the packet
+                auto result = client_conn_->process_packet(data);
+
+                // Check if path validation completed
+                if (path_validation_pending_ && client_conn_->is_path_validated()) {
+                    // Path validated, update remote endpoint
+                    remote_endpoint_ = from;
+                    path_validation_pending_ = false;
+                    nat_rebinding_detected_ = false;
+                    echo::info("Path validated after NAT rebinding, using new address: ", from.to_string());
+                }
+
+                // Send any pending PATH_RESPONSE frames
+                if (client_conn_->has_pending_path_responses()) {
+                    auto responses = client_conn_->take_pending_path_responses();
+                    for (const auto &resp_data : responses) {
+                        auto resp_result = client_conn_->build_path_response_packet(resp_data);
+                        if (resp_result.is_ok()) {
+                            udp_.send_to(resp_result.value(), from);
+                            echo::debug("Sent PATH_RESPONSE");
+                        }
+                    }
+                }
+
+                return result;
             }
         }
 
@@ -687,6 +738,38 @@ namespace netpipe::quic {
 
         // Get config
         const QuicConfig &config() const { return config_; }
+
+        // === NAT Rebinding ===
+
+        // Check if NAT rebinding was detected
+        bool nat_rebinding_detected() const { return nat_rebinding_detected_; }
+
+        // Check if path validation is pending
+        bool path_validation_pending() const { return path_validation_pending_; }
+
+        // Get current remote endpoint (may change after NAT rebinding)
+        const UdpEndpoint &current_remote_endpoint() const { return remote_endpoint_; }
+
+        // Manually initiate path validation (for proactive migration)
+        dp::Res<void> initiate_path_validation() {
+            if (!client_conn_ || !client_conn_->is_connected()) {
+                return dp::result::err(dp::Error::io_error("not connected"));
+            }
+
+            auto challenge_result = client_conn_->build_path_challenge_packet();
+            if (challenge_result.is_err()) {
+                return dp::result::err(challenge_result.error());
+            }
+
+            auto send_result = udp_.send_to(challenge_result.value(), remote_endpoint_);
+            if (send_result.is_err()) {
+                return dp::result::err(send_result.error());
+            }
+
+            path_validation_pending_ = true;
+            echo::debug("Initiated path validation");
+            return dp::result::ok();
+        }
 
         // === 0-RTT / Session Resumption ===
 

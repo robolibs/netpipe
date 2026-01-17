@@ -1,5 +1,6 @@
 #include <chrono>
 #include <doctest/doctest.h>
+#include <netpipe/http3.hpp>
 #include <netpipe/quic.hpp>
 #include <netpipe/quic/ack_manager.hpp>
 #include <netpipe/quic/congestion_control.hpp>
@@ -1243,5 +1244,693 @@ TEST_CASE("QUIC Connection ID Management") {
         // Try to switch to non-existent CID
         bool switched2 = conn.switch_to_peer_cid(99);
         CHECK(switched2 == false);
+    }
+}
+
+TEST_CASE("QUIC NAT Rebinding") {
+    SUBCASE("QuicStream NAT rebinding status") {
+        QuicConfig config;
+        QuicStream stream(config);
+
+        // Initially no NAT rebinding
+        CHECK(stream.nat_rebinding_detected() == false);
+        CHECK(stream.path_validation_pending() == false);
+    }
+
+    SUBCASE("QuicStream path validation initiation") {
+        QuicConfig config;
+        QuicStream stream(config);
+
+        // Cannot initiate path validation without connection
+        auto result = stream.initiate_path_validation();
+        CHECK(result.is_err());
+    }
+}
+
+// =============================================================================
+// HTTP/3 Tests
+// =============================================================================
+
+namespace http3 = netpipe::http3;
+
+TEST_CASE("HTTP/3 Frame Types") {
+    SUBCASE("DATA frame serialization/parsing") {
+        http3::DataFrame frame;
+        frame.data = {0x48, 0x65, 0x6C, 0x6C, 0x6F}; // "Hello"
+
+        auto serialized = frame.serialize();
+        CHECK(!serialized.empty());
+
+        // First byte should be frame type (0x00 for DATA)
+        CHECK(serialized[0] == 0x00);
+
+        // Parse it back (skip frame type byte which is already consumed by caller)
+        auto parse_result = http3::DataFrame::parse(serialized.data() + 1, serialized.size() - 1);
+        REQUIRE(parse_result.is_ok());
+
+        auto &[parsed, consumed] = parse_result.value();
+        CHECK(parsed.data == frame.data);
+    }
+
+    SUBCASE("HEADERS frame serialization/parsing") {
+        http3::HeadersFrame frame;
+        frame.encoded_field_section = {0x00, 0x00, 0xC1, 0xC7}; // Some QPACK data
+
+        auto serialized = frame.serialize();
+        CHECK(!serialized.empty());
+
+        // First byte should be frame type (0x01 for HEADERS)
+        CHECK(serialized[0] == 0x01);
+
+        // Parse it back
+        auto parse_result = http3::HeadersFrame::parse(serialized.data() + 1, serialized.size() - 1);
+        REQUIRE(parse_result.is_ok());
+
+        auto &[parsed, consumed] = parse_result.value();
+        CHECK(parsed.encoded_field_section == frame.encoded_field_section);
+    }
+
+    SUBCASE("SETTINGS frame serialization/parsing") {
+        http3::SettingsFrame frame;
+        frame.settings.qpack_max_table_capacity = 4096;
+        frame.settings.max_field_section_size = 16384;
+        frame.settings.qpack_blocked_streams = 100;
+
+        auto serialized = frame.serialize();
+        CHECK(!serialized.empty());
+
+        // First byte should be frame type (0x04 for SETTINGS)
+        CHECK(serialized[0] == 0x04);
+
+        // Parse it back
+        auto parse_result = http3::SettingsFrame::parse(serialized.data() + 1, serialized.size() - 1);
+        REQUIRE(parse_result.is_ok());
+
+        auto &[parsed, consumed] = parse_result.value();
+        CHECK(parsed.settings.qpack_max_table_capacity == 4096);
+        CHECK(parsed.settings.max_field_section_size == 16384);
+        CHECK(parsed.settings.qpack_blocked_streams == 100);
+    }
+
+    SUBCASE("GOAWAY frame serialization/parsing") {
+        http3::GoAwayFrame frame;
+        frame.stream_id = 12;
+
+        auto serialized = frame.serialize();
+        CHECK(!serialized.empty());
+
+        // First byte should be frame type (0x07 for GOAWAY)
+        CHECK(serialized[0] == 0x07);
+
+        // Parse it back
+        auto parse_result = http3::GoAwayFrame::parse(serialized.data() + 1, serialized.size() - 1);
+        REQUIRE(parse_result.is_ok());
+
+        auto &[parsed, consumed] = parse_result.value();
+        CHECK(parsed.stream_id == 12);
+    }
+
+    SUBCASE("Frame header parsing") {
+        http3::DataFrame frame;
+        frame.data = {0x01, 0x02, 0x03};
+
+        auto serialized = frame.serialize();
+
+        auto header_result = http3::parse_frame_header(serialized.data(), serialized.size());
+        REQUIRE(header_result.is_ok());
+
+        auto [frame_type, type_len] = header_result.value();
+        CHECK(frame_type == http3::FrameType::Data);
+        CHECK(type_len == 1);
+    }
+}
+
+TEST_CASE("HTTP/3 Settings") {
+    SUBCASE("Default settings") {
+        http3::Settings settings;
+
+        CHECK(settings.qpack_max_table_capacity == 0);
+        CHECK(settings.max_field_section_size == 0);
+        CHECK(settings.qpack_blocked_streams == 0);
+    }
+
+    SUBCASE("Settings serialization round-trip") {
+        http3::Settings settings;
+        settings.qpack_max_table_capacity = 1024;
+        settings.max_field_section_size = 8192;
+        settings.qpack_blocked_streams = 16;
+
+        auto serialized = settings.serialize();
+        CHECK(!serialized.empty());
+
+        auto parsed_result = http3::Settings::parse(serialized.data(), serialized.size());
+        REQUIRE(parsed_result.is_ok());
+
+        auto &parsed = parsed_result.value();
+        CHECK(parsed.qpack_max_table_capacity == 1024);
+        CHECK(parsed.max_field_section_size == 8192);
+        CHECK(parsed.qpack_blocked_streams == 16);
+    }
+
+    SUBCASE("Empty settings serialization") {
+        http3::Settings settings;
+
+        auto serialized = settings.serialize();
+        CHECK(serialized.empty()); // All zero values, nothing to serialize
+    }
+}
+
+TEST_CASE("HTTP/3 Request/Response") {
+    SUBCASE("Request pseudo-headers") {
+        http3::Request req;
+        req.method = "GET";
+        req.scheme = "https";
+        req.authority = "example.com";
+        req.path = "/api/test";
+
+        auto pseudo = req.get_pseudo_headers();
+        CHECK(pseudo.size() == 4);
+        CHECK(pseudo[0].name == ":method");
+        CHECK(pseudo[0].value == "GET");
+        CHECK(pseudo[1].name == ":scheme");
+        CHECK(pseudo[1].value == "https");
+        CHECK(pseudo[2].name == ":authority");
+        CHECK(pseudo[2].value == "example.com");
+        CHECK(pseudo[3].name == ":path");
+        CHECK(pseudo[3].value == "/api/test");
+    }
+
+    SUBCASE("Request all headers") {
+        http3::Request req;
+        req.method = "POST";
+        req.scheme = "https";
+        req.authority = "example.com";
+        req.path = "/api/submit";
+        req.headers.push_back({"content-type", "application/json"});
+        req.headers.push_back({"user-agent", "netpipe/1.0"});
+
+        auto all = req.get_all_headers();
+        CHECK(all.size() == 6); // 4 pseudo + 2 regular
+        CHECK(all[4].name == "content-type");
+        CHECK(all[5].name == "user-agent");
+    }
+
+    SUBCASE("Response pseudo-headers") {
+        http3::Response resp;
+        resp.status = 200;
+
+        auto pseudo = resp.get_pseudo_headers();
+        CHECK(pseudo.size() == 1);
+        CHECK(pseudo[0].name == ":status");
+        CHECK(pseudo[0].value == "200");
+    }
+
+    SUBCASE("Response all headers") {
+        http3::Response resp;
+        resp.status = 404;
+        resp.headers.push_back({"content-type", "text/html"});
+
+        auto all = resp.get_all_headers();
+        CHECK(all.size() == 2);
+        CHECK(all[0].name == ":status");
+        CHECK(all[0].value == "404");
+        CHECK(all[1].name == "content-type");
+    }
+}
+
+TEST_CASE("QPACK Encoding/Decoding") {
+    SUBCASE("QPACK static table") {
+        // Verify static table is properly defined
+        CHECK(http3::QPACK_STATIC_TABLE_SIZE > 0);
+
+        // Check some well-known entries
+        CHECK(http3::QPACK_STATIC_TABLE[0].name == ":authority");
+        CHECK(http3::QPACK_STATIC_TABLE[1].name == ":path");
+        CHECK(http3::QPACK_STATIC_TABLE[1].value == "/");
+    }
+
+    SUBCASE("QPACK encoder - indexed static") {
+        http3::QpackEncoder encoder;
+
+        // Encode a header that fully matches static table (e.g., :path = /)
+        http3::HeaderList headers;
+        headers.push_back({":path", "/"});
+
+        auto encoded = encoder.encode(headers);
+        CHECK(!encoded.empty());
+
+        // Should have: Required Insert Count (1 byte) + Delta Base (1 byte) + indexed reference
+        CHECK(encoded.size() >= 3);
+
+        // First two bytes are RIC and Delta Base (both 0)
+        CHECK(encoded[0] == 0x00);
+        CHECK(encoded[1] == 0x00);
+    }
+
+    SUBCASE("QPACK encoder - literal with name reference") {
+        http3::QpackEncoder encoder;
+
+        // Encode a header where name is in static table but value is different
+        http3::HeaderList headers;
+        headers.push_back({":path", "/api/test"});
+
+        auto encoded = encoder.encode(headers);
+        CHECK(!encoded.empty());
+        CHECK(encoded.size() >= 3);
+    }
+
+    SUBCASE("QPACK encoder - literal") {
+        http3::QpackEncoder encoder;
+
+        // Encode a custom header not in static table
+        http3::HeaderList headers;
+        headers.push_back({"x-custom-header", "custom-value"});
+
+        auto encoded = encoder.encode(headers);
+        CHECK(!encoded.empty());
+    }
+
+    SUBCASE("QPACK encoder/decoder round-trip - simple") {
+        http3::QpackEncoder encoder;
+        http3::QpackDecoder decoder;
+
+        http3::HeaderList headers;
+        headers.push_back({":method", "GET"});
+        headers.push_back({":path", "/"});
+
+        auto encoded = encoder.encode(headers);
+        CHECK(!encoded.empty());
+
+        auto decoded_result = decoder.decode(encoded);
+        REQUIRE(decoded_result.is_ok());
+
+        auto &decoded = decoded_result.value();
+        CHECK(decoded.size() == 2);
+        CHECK(decoded[0].name == ":method");
+        CHECK(decoded[0].value == "GET");
+        CHECK(decoded[1].name == ":path");
+        CHECK(decoded[1].value == "/");
+    }
+
+    SUBCASE("QPACK encoder/decoder round-trip - mixed") {
+        http3::QpackEncoder encoder;
+        http3::QpackDecoder decoder;
+
+        http3::HeaderList headers;
+        headers.push_back({":method", "POST"});
+        headers.push_back({":scheme", "https"});
+        headers.push_back({":authority", "example.com"});
+        headers.push_back({":path", "/api/submit"});
+        headers.push_back({"content-type", "application/json"});
+        headers.push_back({"x-request-id", "abc123"});
+
+        auto encoded = encoder.encode(headers);
+        CHECK(!encoded.empty());
+
+        auto decoded_result = decoder.decode(encoded);
+        REQUIRE(decoded_result.is_ok());
+
+        auto &decoded = decoded_result.value();
+        CHECK(decoded.size() == 6);
+        CHECK(decoded[0].name == ":method");
+        CHECK(decoded[0].value == "POST");
+        CHECK(decoded[4].name == "content-type");
+        CHECK(decoded[4].value == "application/json");
+        CHECK(decoded[5].name == "x-request-id");
+        CHECK(decoded[5].value == "abc123");
+    }
+
+    SUBCASE("QPACK decoder - error on truncated data") {
+        http3::QpackDecoder decoder;
+
+        // Too short
+        dp::Vector<dp::u8> data = {0x00};
+        auto result = decoder.decode(data);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("QPACK encoder - request headers") {
+        http3::QpackEncoder encoder;
+        http3::QpackDecoder decoder;
+
+        http3::Request req;
+        req.method = "GET";
+        req.scheme = "https";
+        req.authority = "example.com";
+        req.path = "/index.html";
+        req.headers.push_back({"accept", "*/*"});
+        req.headers.push_back({"accept-encoding", "gzip, deflate, br"});
+
+        auto all_headers = req.get_all_headers();
+        auto encoded = encoder.encode(all_headers);
+
+        auto decoded_result = decoder.decode(encoded);
+        REQUIRE(decoded_result.is_ok());
+
+        auto &decoded = decoded_result.value();
+        CHECK(decoded.size() == 6);
+
+        // Verify pseudo-headers
+        CHECK(decoded[0].name == ":method");
+        CHECK(decoded[0].value == "GET");
+        CHECK(decoded[1].name == ":scheme");
+        CHECK(decoded[1].value == "https");
+        CHECK(decoded[2].name == ":authority");
+        CHECK(decoded[2].value == "example.com");
+        CHECK(decoded[3].name == ":path");
+        CHECK(decoded[3].value == "/index.html");
+    }
+
+    SUBCASE("QPACK encoder - response headers") {
+        http3::QpackEncoder encoder;
+        http3::QpackDecoder decoder;
+
+        http3::Response resp;
+        resp.status = 200;
+        resp.headers.push_back({"content-type", "text/html; charset=utf-8"});
+        resp.headers.push_back({"cache-control", "no-cache"});
+
+        auto all_headers = resp.get_all_headers();
+        auto encoded = encoder.encode(all_headers);
+
+        auto decoded_result = decoder.decode(encoded);
+        REQUIRE(decoded_result.is_ok());
+
+        auto &decoded = decoded_result.value();
+        CHECK(decoded.size() == 3);
+        CHECK(decoded[0].name == ":status");
+        CHECK(decoded[0].value == "200");
+        CHECK(decoded[1].name == "content-type");
+        CHECK(decoded[2].name == "cache-control");
+        CHECK(decoded[2].value == "no-cache");
+    }
+}
+
+TEST_CASE("HTTP/3 Type Exports") {
+    SUBCASE("Main namespace type aliases") {
+        // Verify types are exported to netpipe namespace
+        netpipe::Http3Request req;
+        req.method = "GET";
+        CHECK(req.method == "GET");
+
+        netpipe::Http3Response resp;
+        resp.status = 200;
+        CHECK(resp.status == 200);
+
+        netpipe::Http3Settings settings;
+        settings.qpack_max_table_capacity = 1024;
+        CHECK(settings.qpack_max_table_capacity == 1024);
+
+        netpipe::Http3Connection conn(true);
+        CHECK(conn.is_client() == true);
+    }
+}
+
+TEST_CASE("HTTP/3 Connection") {
+    SUBCASE("Client connection initialization") {
+        http3::Connection conn(true);
+
+        CHECK(conn.is_client() == true);
+        CHECK(conn.state() == http3::ConnectionState::Idle);
+
+        auto init_result = conn.initialize();
+        REQUIRE(init_result.is_ok());
+
+        auto &init_data = init_result.value();
+        CHECK(!init_data.empty());
+        CHECK(conn.state() == http3::ConnectionState::Connecting);
+
+        // Should be a SETTINGS frame
+        CHECK(init_data[0] == 0x04); // SETTINGS frame type
+    }
+
+    SUBCASE("Server connection initialization") {
+        http3::Connection conn(false);
+
+        CHECK(conn.is_client() == false);
+        CHECK(conn.state() == http3::ConnectionState::Idle);
+
+        auto init_result = conn.initialize();
+        REQUIRE(init_result.is_ok());
+
+        CHECK(conn.state() == http3::ConnectionState::Connecting);
+    }
+
+    SUBCASE("Settings exchange") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        // Both initialize
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+
+        // Exchange settings
+        auto client_result = client.process_control_data(server_init);
+        REQUIRE(client_result.is_ok());
+        CHECK(client.state() == http3::ConnectionState::Connected);
+
+        auto server_result = server.process_control_data(client_init);
+        REQUIRE(server_result.is_ok());
+        CHECK(server.state() == http3::ConnectionState::Connected);
+    }
+
+    SUBCASE("Cannot create request before connected") {
+        http3::Connection client(true);
+        client.initialize();
+
+        auto stream_result = client.create_request_stream();
+        CHECK(stream_result.is_err());
+    }
+
+    SUBCASE("Server cannot create request streams") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        auto stream_result = server.create_request_stream();
+        CHECK(stream_result.is_err());
+    }
+
+    SUBCASE("Client creates request stream") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        auto stream_result = client.create_request_stream();
+        REQUIRE(stream_result.is_ok());
+
+        auto stream_id = stream_result.value();
+        CHECK(stream_id == 0); // First client-initiated bidi stream
+
+        // Create another
+        auto stream2_result = client.create_request_stream();
+        REQUIRE(stream2_result.is_ok());
+        CHECK(stream2_result.value() == 4); // Second client-initiated bidi stream
+    }
+
+    SUBCASE("Encode and decode request") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        // Create request
+        auto stream_id = client.create_request_stream().value();
+
+        http3::Request req;
+        req.method = "GET";
+        req.scheme = "https";
+        req.authority = "example.com";
+        req.path = "/api/test";
+        req.headers.push_back(http3::HeaderField("user-agent", "netpipe/1.0"));
+
+        auto encoded_result = client.encode_request(stream_id, req);
+        REQUIRE(encoded_result.is_ok());
+
+        auto &encoded = encoded_result.value();
+        CHECK(!encoded.empty());
+
+        // Server processes the request
+        auto process_result = server.process_request_stream(stream_id, encoded);
+        REQUIRE(process_result.is_ok());
+
+        // Mark stream as finished
+        server.stream_finished(stream_id);
+
+        // Server can retrieve request
+        auto request_opt = server.get_request(stream_id);
+        REQUIRE(request_opt.has_value());
+
+        auto &received_req = request_opt.value();
+        CHECK(received_req.method == "GET");
+        CHECK(received_req.scheme == "https");
+        CHECK(received_req.authority == "example.com");
+        CHECK(received_req.path == "/api/test");
+    }
+
+    SUBCASE("Encode and decode response") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        // Client sends request
+        auto stream_id = client.create_request_stream().value();
+        http3::Request req;
+        req.method = "GET";
+        req.scheme = "https";
+        req.authority = "example.com";
+        req.path = "/";
+        auto req_data = client.encode_request(stream_id, req).value();
+        server.process_request_stream(stream_id, req_data);
+
+        // Server sends response
+        http3::Response resp;
+        resp.status = 200;
+        resp.headers.push_back(http3::HeaderField("content-type", "text/html"));
+
+        auto resp_data = server.encode_response(stream_id, resp).value();
+        CHECK(!resp_data.empty());
+
+        // Client processes response
+        auto process_result = client.process_request_stream(stream_id, resp_data);
+        REQUIRE(process_result.is_ok());
+
+        auto response_opt = client.get_response(stream_id);
+        REQUIRE(response_opt.has_value());
+
+        auto &received_resp = response_opt.value();
+        CHECK(received_resp.status == 200);
+    }
+
+    SUBCASE("Request with body") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        auto stream_id = client.create_request_stream().value();
+
+        http3::Request req;
+        req.method = "POST";
+        req.scheme = "https";
+        req.authority = "example.com";
+        req.path = "/api/submit";
+        req.headers.push_back(http3::HeaderField("content-type", "application/json"));
+
+        auto headers_data = client.encode_request(stream_id, req).value();
+
+        dp::Vector<dp::u8> body = {'{', '"', 'k', 'e', 'y', '"', ':', '"', 'v', 'a', 'l', '"', '}'};
+        auto body_data = client.encode_data(stream_id, body).value();
+
+        // Server receives headers and body
+        server.process_request_stream(stream_id, headers_data);
+        server.process_request_stream(stream_id, body_data);
+
+        auto request_opt = server.get_request(stream_id);
+        REQUIRE(request_opt.has_value());
+
+        auto &received = request_opt.value();
+        CHECK(received.method == "POST");
+        CHECK(received.body == body);
+    }
+
+    SUBCASE("GOAWAY frame") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        // Server sends GOAWAY
+        auto goaway_data = server.create_goaway(4);
+        CHECK(!goaway_data.empty());
+        CHECK(server.state() == http3::ConnectionState::GoingAway);
+
+        // Client receives GOAWAY
+        auto result = client.process_control_data(goaway_data);
+        REQUIRE(result.is_ok());
+
+        CHECK(client.goaway_received() == true);
+        CHECK(client.goaway_stream_id() == 4);
+        CHECK(client.state() == http3::ConnectionState::GoingAway);
+    }
+
+    SUBCASE("Active streams tracking") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        auto stream1 = client.create_request_stream().value();
+        auto stream2 = client.create_request_stream().value();
+
+        auto active = client.active_streams();
+        CHECK(active.size() == 2);
+
+        client.close_stream(stream1);
+        active = client.active_streams();
+        CHECK(active.size() == 1);
+        CHECK(active[0] == stream2);
+    }
+
+    SUBCASE("Cannot encode headers twice") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        auto stream_id = client.create_request_stream().value();
+
+        http3::Request req;
+        req.method = "GET";
+        req.path = "/";
+
+        auto first = client.encode_request(stream_id, req);
+        CHECK(first.is_ok());
+
+        auto second = client.encode_request(stream_id, req);
+        CHECK(second.is_err());
+    }
+
+    SUBCASE("Cannot send data before headers") {
+        http3::Connection client(true);
+        http3::Connection server(false);
+
+        auto client_init = client.initialize().value();
+        auto server_init = server.initialize().value();
+        client.process_control_data(server_init);
+        server.process_control_data(client_init);
+
+        auto stream_id = client.create_request_stream().value();
+
+        dp::Vector<dp::u8> body = {'t', 'e', 's', 't'};
+        auto result = client.encode_data(stream_id, body);
+        CHECK(result.is_err());
     }
 }

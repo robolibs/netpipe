@@ -757,7 +757,7 @@ namespace netpipe::quic {
                 // Could trigger version negotiation
             }
 
-            PacketNumberSpace space;
+            PacketNumberSpace space = PacketNumberSpace::Initial;
             switch (header.packet_type) {
             case LongPacketType::Initial:
                 space = PacketNumberSpace::Initial;
@@ -770,6 +770,8 @@ namespace netpipe::quic {
                 break;
             case LongPacketType::Retry:
                 return process_retry_packet(packet);
+            default:
+                return dp::result::err(dp::Error::invalid_argument("unknown packet type"));
             }
 
             auto &pn_space = spaces_[static_cast<int>(space)];
