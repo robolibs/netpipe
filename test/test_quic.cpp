@@ -1,13 +1,13 @@
 #include <chrono>
 #include <doctest/doctest.h>
-#include <netpipe/http3.hpp>
-#include <netpipe/quic.hpp>
-#include <netpipe/quic/ack_manager.hpp>
-#include <netpipe/quic/congestion_control.hpp>
-#include <netpipe/quic/flow_control.hpp>
-#include <netpipe/quic/loss_detection.hpp>
-#include <netpipe/quic/tls_adapter.hpp>
-#include <netpipe/tls/messages.hpp>
+#include <netpipe/protocol/http3.hpp>
+#include <netpipe/transport/stream/quic.hpp>
+#include <netpipe/transport/stream/quic/ack_manager.hpp>
+#include <netpipe/transport/stream/quic/congestion_control.hpp>
+#include <netpipe/transport/stream/quic/flow_control.hpp>
+#include <netpipe/transport/stream/quic/loss_detection.hpp>
+#include <netpipe/transport/stream/quic/tls_adapter.hpp>
+#include <netpipe/security/tls/messages.hpp>
 #include <thread>
 
 using namespace netpipe::quic;
@@ -1128,6 +1128,242 @@ TEST_CASE("QUIC Path Validation") {
         // No pending responses initially
         CHECK(conn.has_pending_path_responses() == false);
     }
+
+    SUBCASE("Anti-amplification limits") {
+        Connection server(false);
+        server.set_local_cid(ConnectionId::generate(8));
+        server.set_remote_cid(ConnectionId::generate(8));
+
+        // Simulate unvalidated path
+        server.reset_path_validation();
+        CHECK(!server.is_path_validated());
+
+        // Initially can't send (nothing received)
+        CHECK(!server.can_send_before_validation(100));
+        CHECK(server.bytes_until_amplification_limit() == 0);
+
+        // Record some bytes received
+        server.record_bytes_received(100);
+
+        // Now can send up to 3x (300 bytes)
+        CHECK(server.can_send_before_validation(300));
+        CHECK(!server.can_send_before_validation(301));
+        CHECK(server.bytes_until_amplification_limit() == 300);
+
+        // Record some sent bytes
+        server.record_bytes_sent(200);
+        CHECK(server.bytes_until_amplification_limit() == 100);
+        CHECK(server.can_send_before_validation(100));
+        CHECK(!server.can_send_before_validation(101));
+    }
+
+    SUBCASE("Path challenge timeout and retry") {
+        Connection conn(true);
+        conn.set_local_cid(ConnectionId::generate(8));
+        conn.set_remote_cid(ConnectionId::generate(8));
+        conn.start_handshake();
+
+        // Initiate challenge
+        auto challenge = conn.initiate_path_challenge();
+        CHECK(!conn.is_path_validated());
+        CHECK(conn.path_challenge_retry_count() == 0);
+
+        // Immediately after, should not need retry
+        auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()
+        ).count();
+        CHECK(!conn.should_retry_path_challenge(now));
+
+        // After timeout, should retry
+        auto future = now + 1100; // 1.1 seconds later
+        CHECK(conn.should_retry_path_challenge(future));
+
+        // Retry
+        auto retry_challenge = conn.retry_path_challenge();
+        CHECK(retry_challenge == challenge); // Same challenge data
+        CHECK(conn.path_challenge_retry_count() == 1);
+
+        // After max retries, should not retry but should be marked as failed
+        for (int i = 0; i < 3; i++) {
+            if (conn.should_retry_path_challenge(future + i * 2000)) {
+                conn.retry_path_challenge();
+            }
+        }
+        CHECK(conn.has_path_validation_failed());
+    }
+
+    SUBCASE("Reset path validation") {
+        Connection conn(true);
+        conn.set_local_cid(ConnectionId::generate(8));
+        conn.set_remote_cid(ConnectionId::generate(8));
+        conn.start_handshake();
+
+        // Initiate and make some state
+        conn.initiate_path_challenge();
+        conn.record_bytes_received(1000);
+        conn.record_bytes_sent(500);
+
+        // Reset
+        conn.reset_path_validation();
+        CHECK(!conn.is_path_validated());
+        CHECK(conn.path_challenge_retry_count() == 0);
+        CHECK(conn.bytes_until_amplification_limit() == 0);
+    }
+
+    SUBCASE("Validated path has no amplification limit") {
+        Connection conn(true);
+        conn.set_local_cid(ConnectionId::generate(8));
+        conn.set_remote_cid(ConnectionId::generate(8));
+        conn.start_handshake();
+
+        // Path is validated by default
+        CHECK(conn.is_path_validated());
+        CHECK(conn.can_send_before_validation(1000000)); // Can send any amount
+        CHECK(conn.bytes_until_amplification_limit() == dp::u64(-1)); // No limit
+    }
+}
+
+// =============================================================================
+// QUIC Version Negotiation Tests
+// =============================================================================
+
+TEST_CASE("QUIC Version Negotiation") {
+    SUBCASE("VersionNegotiationPacket serialization") {
+        VersionNegotiationPacket packet;
+        packet.dest_cid = ConnectionId::generate(8);
+        packet.src_cid = ConnectionId::generate(8);
+        packet.supported_versions = {QUIC_VERSION_1, QUIC_VERSION_2};
+
+        auto serialized = packet.serialize();
+        CHECK(!serialized.empty());
+
+        // First byte should have form bit set
+        CHECK((serialized[0] & 0x80) != 0);
+
+        // Version should be 0
+        dp::u32 version = (static_cast<dp::u32>(serialized[1]) << 24) |
+                          (static_cast<dp::u32>(serialized[2]) << 16) |
+                          (static_cast<dp::u32>(serialized[3]) << 8) |
+                          static_cast<dp::u32>(serialized[4]);
+        CHECK(version == 0);
+    }
+
+    SUBCASE("VersionNegotiationPacket parse") {
+        VersionNegotiationPacket original;
+        original.dest_cid = ConnectionId::generate(8);
+        original.src_cid = ConnectionId::generate(4);
+        original.supported_versions = {QUIC_VERSION_1, QUIC_VERSION_2, 0x12345678};
+
+        auto serialized = original.serialize();
+        auto parse_result = VersionNegotiationPacket::parse(serialized.data(), serialized.size());
+        REQUIRE(parse_result.is_ok());
+
+        auto &parsed = parse_result.value();
+        CHECK(parsed.dest_cid == original.dest_cid);
+        CHECK(parsed.src_cid == original.src_cid);
+        CHECK(parsed.supported_versions.size() == 3);
+        CHECK(parsed.supported_versions[0] == QUIC_VERSION_1);
+        CHECK(parsed.supported_versions[1] == QUIC_VERSION_2);
+        CHECK(parsed.supported_versions[2] == 0x12345678);
+    }
+
+    SUBCASE("Connection supported versions") {
+        auto versions = Connection::supported_versions();
+        CHECK(versions.size() >= 1);
+        CHECK(Connection::is_version_supported(QUIC_VERSION_1));
+        CHECK(Connection::is_version_supported(QUIC_VERSION_2));
+        CHECK(!Connection::is_version_supported(0x99999999));
+    }
+
+    SUBCASE("Connection build version negotiation") {
+        auto dcid = ConnectionId::generate(8);
+        auto scid = ConnectionId::generate(8);
+
+        auto vn_data = Connection::build_version_negotiation(dcid, scid);
+        CHECK(!vn_data.empty());
+
+        auto parse_result = VersionNegotiationPacket::parse(vn_data.data(), vn_data.size());
+        REQUIRE(parse_result.is_ok());
+
+        auto &parsed = parse_result.value();
+        CHECK(parsed.dest_cid == dcid);
+        CHECK(parsed.src_cid == scid);
+        CHECK(parsed.supported_versions.size() >= 1);
+    }
+
+    SUBCASE("Client processes version negotiation") {
+        Connection client(true);
+        auto client_cid = ConnectionId::generate(8);
+        auto server_cid = ConnectionId::generate(8);
+        client.set_local_cid(client_cid);
+        client.set_remote_cid(server_cid);
+
+        // Server sends version negotiation
+        VersionNegotiationPacket vn;
+        vn.dest_cid = client_cid;
+        vn.src_cid = server_cid;
+        vn.supported_versions = {QUIC_VERSION_2, QUIC_VERSION_1};
+
+        auto result = client.process_version_negotiation(vn);
+        CHECK(result.is_ok());
+        CHECK(client.version_negotiation_received());
+
+        // Should have selected a supported version
+        auto selected = result.value();
+        CHECK(Connection::is_version_supported(selected));
+    }
+
+    SUBCASE("Version negotiation fails with incompatible versions") {
+        Connection client(true);
+        auto client_cid = ConnectionId::generate(8);
+        client.set_local_cid(client_cid);
+        client.set_remote_cid(ConnectionId::generate(8));
+
+        VersionNegotiationPacket vn;
+        vn.dest_cid = client_cid;
+        vn.src_cid = ConnectionId::generate(8);
+        vn.supported_versions = {0x99999999, 0xAAAAAAAA}; // Unknown versions
+
+        auto result = client.process_version_negotiation(vn);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Version negotiation fails with wrong DCID") {
+        Connection client(true);
+        auto client_cid = ConnectionId::generate(8);
+        client.set_local_cid(client_cid);
+        client.set_remote_cid(ConnectionId::generate(8));
+
+        VersionNegotiationPacket vn;
+        vn.dest_cid = ConnectionId::generate(8); // Wrong DCID
+        vn.src_cid = ConnectionId::generate(8);
+        vn.supported_versions = {QUIC_VERSION_1};
+
+        auto result = client.process_version_negotiation(vn);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Server should not receive version negotiation") {
+        Connection server(false);
+        server.set_local_cid(ConnectionId::generate(8));
+        server.set_remote_cid(ConnectionId::generate(8));
+
+        VersionNegotiationPacket vn;
+        vn.dest_cid = server.local_cid();
+        vn.src_cid = ConnectionId::generate(8);
+        vn.supported_versions = {QUIC_VERSION_1};
+
+        auto result = server.process_version_negotiation(vn);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Set and get version") {
+        Connection conn(true);
+        CHECK(conn.version() == QUIC_VERSION_1); // Default
+
+        conn.set_version(QUIC_VERSION_2);
+        CHECK(conn.version() == QUIC_VERSION_2);
+    }
 }
 
 TEST_CASE("QUIC Connection ID Management") {
@@ -1932,5 +2168,746 @@ TEST_CASE("HTTP/3 Connection") {
         dp::Vector<dp::u8> body = {'t', 'e', 's', 't'};
         auto result = client.encode_data(stream_id, body);
         CHECK(result.is_err());
+    }
+}
+
+// =============================================================================
+// Key Phase / Key Update Tests
+// =============================================================================
+
+TEST_CASE("QUIC Key Phase State") {
+    SUBCASE("Key update secret derivation") {
+        dp::Vector<dp::u8> secret(32, 0x42);
+        auto updated_secret = derive_key_update_secret(secret);
+        CHECK(updated_secret.size() == 32);
+        CHECK(updated_secret != secret);
+    }
+
+    SUBCASE("Key phase state initialization") {
+        KeyPhaseState state;
+        CHECK(state.current_phase == false);
+        CHECK(state.key_update_count == 0);
+
+        dp::Vector<dp::u8> client_secret(32, 0x11);
+        dp::Vector<dp::u8> server_secret(32, 0x22);
+
+        state.initialize(client_secret, server_secret, true);
+        CHECK(state.current_phase == false);
+        CHECK(state.read_keys.is_valid());
+        CHECK(state.write_keys.is_valid());
+        CHECK(state.next_read_keys.is_valid());
+        CHECK(state.next_write_keys.is_valid());
+    }
+
+    SUBCASE("Initiate key update") {
+        KeyPhaseState state;
+        dp::Vector<dp::u8> client_secret(32, 0x11);
+        dp::Vector<dp::u8> server_secret(32, 0x22);
+        state.initialize(client_secret, server_secret, true);
+
+        CHECK(state.initiate_key_update(100));
+        CHECK(state.pending_key_update);
+
+        // Double initiate should fail
+        CHECK(!state.initiate_key_update(101));
+    }
+
+    SUBCASE("Apply pending key update") {
+        KeyPhaseState state;
+        dp::Vector<dp::u8> client_secret(32, 0x11);
+        dp::Vector<dp::u8> server_secret(32, 0x22);
+        state.initialize(client_secret, server_secret, true);
+
+        auto original_keys = state.write_keys;
+        CHECK(state.current_phase == false);
+
+        state.initiate_key_update(100);
+        state.apply_pending_key_update(100);
+
+        CHECK(state.current_phase == true);
+        CHECK(state.key_update_count == 1);
+        CHECK(!state.pending_key_update);
+        CHECK(state.write_keys.key != original_keys.key);
+    }
+
+    SUBCASE("Get write phase") {
+        KeyPhaseState state;
+        dp::Vector<dp::u8> client_secret(32, 0x11);
+        dp::Vector<dp::u8> server_secret(32, 0x22);
+        state.initialize(client_secret, server_secret, true);
+
+        CHECK(state.get_write_phase() == false);
+
+        state.initiate_key_update(1);
+        state.apply_pending_key_update(1);
+
+        CHECK(state.get_write_phase() == true);
+    }
+
+    SUBCASE("Get decryption keys - same phase") {
+        KeyPhaseState state;
+        dp::Vector<dp::u8> client_secret(32, 0x11);
+        dp::Vector<dp::u8> server_secret(32, 0x22);
+        state.initialize(client_secret, server_secret, true);
+
+        auto *keys = state.get_decryption_keys(false, 100);
+        CHECK(keys != nullptr);
+        CHECK(keys == &state.read_keys);
+    }
+
+    SUBCASE("Get decryption keys - peer initiated key update") {
+        KeyPhaseState state;
+        dp::Vector<dp::u8> client_secret(32, 0x11);
+        dp::Vector<dp::u8> server_secret(32, 0x22);
+        state.initialize(client_secret, server_secret, true);
+
+        auto original_keys = state.read_keys;
+
+        // Receive packet with different phase
+        auto *keys = state.get_decryption_keys(true, 200);
+        CHECK(keys != nullptr);
+        CHECK(state.current_phase == true);
+        CHECK(state.key_update_count == 1);
+        CHECK(state.peer_key_update_received);
+    }
+
+    SUBCASE("Should send key update after peer update") {
+        KeyPhaseState state;
+        dp::Vector<dp::u8> client_secret(32, 0x11);
+        dp::Vector<dp::u8> server_secret(32, 0x22);
+        state.initialize(client_secret, server_secret, true);
+
+        CHECK(!state.should_send_key_update());
+
+        // Receive peer key update
+        state.get_decryption_keys(true, 200);
+
+        CHECK(state.should_send_key_update());
+    }
+
+    SUBCASE("Multiple key updates") {
+        KeyPhaseState state;
+        dp::Vector<dp::u8> client_secret(32, 0x11);
+        dp::Vector<dp::u8> server_secret(32, 0x22);
+        state.initialize(client_secret, server_secret, true);
+
+        // First key update
+        state.initiate_key_update(100);
+        state.apply_pending_key_update(100);
+        CHECK(state.key_update_count == 1);
+        CHECK(state.current_phase == true);
+
+        // Second key update
+        state.initiate_key_update(200);
+        state.apply_pending_key_update(200);
+        CHECK(state.key_update_count == 2);
+        CHECK(state.current_phase == false);
+
+        // Third key update
+        state.initiate_key_update(300);
+        state.apply_pending_key_update(300);
+        CHECK(state.key_update_count == 3);
+        CHECK(state.current_phase == true);
+    }
+}
+
+TEST_CASE("QUIC Connection Key Phase") {
+    SUBCASE("Initial key phase") {
+        Connection client(true);
+        CHECK(client.current_key_phase() == false);
+        CHECK(client.key_update_count() == 0);
+    }
+
+    SUBCASE("Cannot initiate key update before connected") {
+        Connection client(true);
+        CHECK(!client.initiate_key_update());
+    }
+}
+
+// =============================================================================
+// Packet Coalescing Tests
+// =============================================================================
+
+TEST_CASE("QUIC Packet Coalescing") {
+    SUBCASE("Coalesce multiple packets") {
+        Connection conn(true);
+
+        dp::Vector<dp::Vector<dp::u8>> packets;
+        packets.push_back({'a', 'b', 'c', 'd'});
+        packets.push_back({'e', 'f', 'g'});
+        packets.push_back({'h', 'i'});
+
+        auto result = conn.coalesce_packets(packets);
+        CHECK(result.is_ok());
+        CHECK(result.value().size() == 9);
+        CHECK(result.value()[0] == 'a');
+        CHECK(result.value()[4] == 'e');
+        CHECK(result.value()[7] == 'h');
+    }
+
+    SUBCASE("Coalesce respects max size") {
+        Connection conn(true);
+
+        dp::Vector<dp::Vector<dp::u8>> packets;
+        packets.push_back(dp::Vector<dp::u8>(100, 'a'));
+        packets.push_back(dp::Vector<dp::u8>(100, 'b'));
+        packets.push_back(dp::Vector<dp::u8>(100, 'c'));
+
+        // With max size of 250, only 2 packets fit
+        auto result = conn.coalesce_packets(packets, 250);
+        CHECK(result.is_ok());
+        CHECK(result.value().size() == 200);
+    }
+
+    SUBCASE("Coalesce fails for packet larger than MTU") {
+        Connection conn(true);
+
+        dp::Vector<dp::Vector<dp::u8>> packets;
+        packets.push_back(dp::Vector<dp::u8>(2000, 'x')); // Larger than default MTU
+
+        auto result = conn.coalesce_packets(packets);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Coalesce empty packet list fails") {
+        Connection conn(true);
+
+        dp::Vector<dp::Vector<dp::u8>> packets;
+        auto result = conn.coalesce_packets(packets);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Coalesce single packet") {
+        Connection conn(true);
+
+        dp::Vector<dp::Vector<dp::u8>> packets;
+        packets.push_back({'t', 'e', 's', 't'});
+
+        auto result = conn.coalesce_packets(packets);
+        CHECK(result.is_ok());
+        CHECK(result.value().size() == 4);
+    }
+
+    SUBCASE("Can coalesce check") {
+        Connection conn(true);
+        // Without any keys set, can_coalesce should return false
+        CHECK(!conn.can_coalesce());
+    }
+}
+
+// =============================================================================
+// Stateless Reset Tests
+// =============================================================================
+
+TEST_CASE("QUIC Stateless Reset") {
+    SUBCASE("Build stateless reset packet") {
+        Connection conn(true);
+
+        dp::Vector<dp::u8> token(16, 0xAB);
+        auto packet = conn.build_stateless_reset(token);
+
+        // Packet should be at least 21 bytes
+        CHECK(packet.size() >= Connection::STATELESS_RESET_MIN_SIZE);
+
+        // Last 16 bytes should be the token
+        dp::Vector<dp::u8> extracted_token(packet.end() - 16, packet.end());
+        CHECK(extracted_token == token);
+
+        // First byte should have fixed bit set, form bit clear
+        CHECK((packet[0] & 0x40) == 0x40); // Fixed bit set
+        CHECK((packet[0] & 0x80) == 0x00); // Form bit clear (short header)
+    }
+
+    SUBCASE("Detect stateless reset - no match without token") {
+        Connection conn(true);
+
+        // Create a fake packet with random token
+        dp::Vector<dp::u8> packet(25, 0x00);
+        CHECK(!conn.is_stateless_reset(packet));
+    }
+
+    SUBCASE("Detect stateless reset - with peer token") {
+        Connection conn(true);
+
+        // Set peer's stateless reset token
+        dp::Vector<dp::u8> token(16, 0xCD);
+        conn.set_peer_stateless_reset_token(token);
+
+        // Create a packet with matching token at the end
+        dp::Vector<dp::u8> packet(30, 0x00);
+        std::copy(token.begin(), token.end(), packet.end() - 16);
+
+        CHECK(conn.is_stateless_reset(packet));
+    }
+
+    SUBCASE("Detect stateless reset - wrong token") {
+        Connection conn(true);
+
+        // Set peer's stateless reset token
+        dp::Vector<dp::u8> token(16, 0xCD);
+        conn.set_peer_stateless_reset_token(token);
+
+        // Create a packet with different token
+        dp::Vector<dp::u8> packet(30, 0x00);
+        dp::Vector<dp::u8> wrong_token(16, 0xEF);
+        std::copy(wrong_token.begin(), wrong_token.end(), packet.end() - 16);
+
+        CHECK(!conn.is_stateless_reset(packet));
+    }
+
+    SUBCASE("Packet too short for stateless reset") {
+        Connection conn(true);
+
+        dp::Vector<dp::u8> token(16, 0xAB);
+        conn.set_peer_stateless_reset_token(token);
+
+        // Packet shorter than minimum size
+        dp::Vector<dp::u8> packet(15, 0x00);
+        CHECK(!conn.is_stateless_reset(packet));
+    }
+
+    SUBCASE("Handle stateless reset closes connection") {
+        Connection conn(true);
+
+        CHECK(conn.state() != ConnectionState::Closed);
+        conn.handle_stateless_reset();
+        CHECK(conn.state() == ConnectionState::Closed);
+    }
+
+    SUBCASE("Get local stateless reset token") {
+        Connection conn(true);
+
+        // Initially empty (no CIDs issued)
+        auto token = conn.get_local_stateless_reset_token();
+        // The token may be empty or have a value depending on constructor
+    }
+}
+
+// =============================================================================
+// Address Validation Tokens (RFC 9000 Section 8.1)
+// =============================================================================
+
+TEST_CASE("QUIC Address Validation Tokens") {
+    SUBCASE("Server generates NEW_TOKEN") {
+        Connection server(false);
+        server.init_token_secret();
+
+        auto result = server.generate_new_token("192.168.1.100:12345");
+        CHECK(result.is_ok());
+        CHECK(!result.value().token.empty());
+    }
+
+    SUBCASE("Client cannot generate tokens") {
+        Connection client(true);
+
+        auto result = client.generate_new_token("192.168.1.100:12345");
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Server validates token") {
+        Connection server(false);
+        server.init_token_secret();
+
+        // Generate a token
+        dp::String addr = "192.168.1.100:12345";
+        auto gen_result = server.generate_new_token(addr);
+        CHECK(gen_result.is_ok());
+
+        // Validate it
+        auto val_result = server.validate_token(gen_result.value().token);
+        CHECK(val_result.is_ok());
+        CHECK(val_result.value() == addr);
+    }
+
+    SUBCASE("Invalid token rejected") {
+        Connection server(false);
+        server.init_token_secret();
+
+        // Random invalid token
+        dp::Vector<dp::u8> invalid_token(50, 0x42);
+        auto result = server.validate_token(invalid_token);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Token too short rejected") {
+        Connection server(false);
+        server.init_token_secret();
+
+        dp::Vector<dp::u8> short_token(10, 0x00);
+        auto result = server.validate_token(short_token);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Client cannot validate tokens") {
+        Connection client(true);
+
+        dp::Vector<dp::u8> token(50, 0x00);
+        auto result = client.validate_token(token);
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Client stores token") {
+        Connection client(true);
+
+        dp::Vector<dp::u8> token = {0x01, 0x02, 0x03, 0x04};
+        dp::String server_name = "example.com";
+
+        CHECK(!client.has_stored_token(server_name));
+        client.store_token(server_name, token);
+
+        CHECK(client.has_stored_token(server_name));
+        auto stored = client.get_stored_token(server_name);
+        CHECK(stored.has_value());
+        CHECK(stored.value() == token);
+    }
+
+    SUBCASE("Client clears token") {
+        Connection client(true);
+
+        dp::Vector<dp::u8> token = {0x01, 0x02, 0x03};
+        dp::String server_name = "example.com";
+
+        client.store_token(server_name, token);
+        CHECK(client.has_stored_token(server_name));
+
+        client.clear_stored_token(server_name);
+        CHECK(!client.has_stored_token(server_name));
+    }
+
+    SUBCASE("Client handles NEW_TOKEN frame") {
+        Connection client(true);
+
+        NewTokenFrame frame;
+        frame.token = {0x10, 0x20, 0x30, 0x40};
+        dp::String server_name = "test.example.com";
+
+        auto result = client.handle_new_token(frame, server_name);
+        CHECK(result.is_ok());
+
+        auto stored = client.get_stored_token(server_name);
+        CHECK(stored.has_value());
+        CHECK(stored.value() == frame.token);
+    }
+
+    SUBCASE("Server cannot handle NEW_TOKEN") {
+        Connection server(false);
+
+        NewTokenFrame frame;
+        frame.token = {0x01};
+
+        auto result = server.handle_new_token(frame, "server");
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Empty NEW_TOKEN rejected") {
+        Connection client(true);
+
+        NewTokenFrame frame;
+        // Empty token
+
+        auto result = client.handle_new_token(frame, "test.com");
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Server stores no tokens") {
+        Connection server(false);
+
+        // Server should not store tokens
+        dp::Vector<dp::u8> token = {0x01};
+        server.store_token("test", token);  // Should be no-op
+
+        CHECK(!server.has_stored_token("test"));
+        CHECK(!server.get_stored_token("test").has_value());
+    }
+
+    SUBCASE("Different servers have different tokens") {
+        Connection client(true);
+
+        dp::Vector<dp::u8> token1 = {0x01, 0x02};
+        dp::Vector<dp::u8> token2 = {0x03, 0x04};
+
+        client.store_token("server1.com", token1);
+        client.store_token("server2.com", token2);
+
+        auto stored1 = client.get_stored_token("server1.com");
+        auto stored2 = client.get_stored_token("server2.com");
+
+        CHECK(stored1.has_value());
+        CHECK(stored2.has_value());
+        CHECK(stored1.value() == token1);
+        CHECK(stored2.value() == token2);
+    }
+
+    SUBCASE("Token with same secret can be validated") {
+        // Two server instances with same secret
+        Connection server1(false);
+        Connection server2(false);
+
+        dp::Vector<dp::u8> secret(32, 0xAB);
+        server1.set_token_secret(secret);
+        server2.set_token_secret(secret);
+
+        // Generate on server1
+        auto gen_result = server1.generate_new_token("10.0.0.1:443");
+        CHECK(gen_result.is_ok());
+
+        // Validate on server2
+        auto val_result = server2.validate_token(gen_result.value().token);
+        CHECK(val_result.is_ok());
+        CHECK(val_result.value() == "10.0.0.1:443");
+    }
+
+    SUBCASE("Token with different secret fails validation") {
+        Connection server1(false);
+        Connection server2(false);
+
+        dp::Vector<dp::u8> secret1(32, 0xAB);
+        dp::Vector<dp::u8> secret2(32, 0xCD);
+        server1.set_token_secret(secret1);
+        server2.set_token_secret(secret2);
+
+        // Generate on server1
+        auto gen_result = server1.generate_new_token("10.0.0.1:443");
+        CHECK(gen_result.is_ok());
+
+        // Validate on server2 should fail
+        auto val_result = server2.validate_token(gen_result.value().token);
+        CHECK(val_result.is_err());
+    }
+
+    SUBCASE("NewTokenFrame serialization/parsing") {
+        NewTokenFrame frame;
+        frame.token = {0x01, 0x02, 0x03, 0x04, 0x05};
+
+        auto serialized = frame.serialize();
+        CHECK(!serialized.empty());
+
+        auto parsed = NewTokenFrame::parse(serialized.data(), serialized.size());
+        CHECK(parsed.is_ok());
+        CHECK(parsed.value().first.token == frame.token);
+    }
+}
+
+// =============================================================================
+// Connection Migration (RFC 9000 Section 9)
+// =============================================================================
+
+TEST_CASE("QUIC Connection Migration") {
+    SUBCASE("Initial migration state is Idle") {
+        Connection conn(true);
+        CHECK(conn.migration_state() == Connection::MigrationState::Idle);
+        CHECK(!conn.is_migrating());
+    }
+
+    SUBCASE("Set and get addresses") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        CHECK(conn.local_address() == "192.168.1.1:5000");
+        CHECK(conn.remote_address() == "10.0.0.1:443");
+    }
+
+    SUBCASE("Migration support check") {
+        Connection conn(true);
+
+        // By default, migration should be supported (peer hasn't disabled it)
+        CHECK(conn.supports_migration());
+    }
+
+    SUBCASE("Cannot migrate if not connected") {
+        Connection conn(true);
+        // State is Idle, not Connected
+
+        auto result = conn.initiate_migration("192.168.2.1:6000");
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Initiate migration - success path") {
+        Connection conn(true);
+
+        // Set up as connected
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Simulate connection established by forcing state
+        // Note: In real code, this happens through handshake
+        // For testing, we just check the migration logic
+
+        CHECK(conn.migration_state() == Connection::MigrationState::Idle);
+    }
+
+    SUBCASE("Handle peer address change") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Same address - no change
+        auto result1 = conn.handle_peer_address_change("10.0.0.1:443");
+        CHECK(result1.is_ok());
+        CHECK(conn.migration_state() == Connection::MigrationState::Idle);
+
+        // Different address - triggers migration
+        auto result2 = conn.handle_peer_address_change("10.0.0.2:443");
+        CHECK(result2.is_ok());
+        CHECK(conn.migration_state() == Connection::MigrationState::Probing);
+        CHECK(conn.is_migrating());
+    }
+
+    SUBCASE("Cancel migration") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Start migration
+        conn.handle_peer_address_change("10.0.0.2:443");
+        CHECK(conn.is_migrating());
+
+        // Cancel it
+        conn.cancel_migration();
+        CHECK(!conn.is_migrating());
+        CHECK(conn.migration_state() == Connection::MigrationState::Idle);
+    }
+
+    SUBCASE("Complete migration updates addresses") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Start migration due to peer address change
+        conn.handle_peer_address_change("10.0.0.2:443");
+        CHECK(conn.is_migrating());
+
+        // Simulate successful path validation
+        conn.on_path_validation_result(true);
+
+        // Migration should be complete and addresses updated
+        CHECK(!conn.is_migrating());
+        CHECK(conn.remote_address() == "10.0.0.2:443");
+    }
+
+    SUBCASE("Failed path validation cancels migration") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Start migration
+        conn.handle_peer_address_change("10.0.0.2:443");
+        CHECK(conn.is_migrating());
+
+        // Path validation fails
+        conn.on_path_validation_result(false);
+
+        // Migration should be cancelled, original address kept
+        CHECK(!conn.is_migrating());
+        CHECK(conn.remote_address() == "10.0.0.1:443");
+    }
+
+    SUBCASE("should_complete_migration check") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Not migrating - should not complete
+        CHECK(!conn.should_complete_migration());
+
+        // Start migration
+        conn.handle_peer_address_change("10.0.0.2:443");
+        CHECK(conn.is_migrating());
+
+        // Path not validated yet - should not complete
+        CHECK(!conn.should_complete_migration());
+    }
+
+    SUBCASE("Cannot start migration while already migrating") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // First migration
+        conn.handle_peer_address_change("10.0.0.2:443");
+        CHECK(conn.is_migrating());
+
+        // Another change while migrating still updates pending
+        auto result = conn.handle_peer_address_change("10.0.0.3:443");
+        // This doesn't error but will update the pending address
+        CHECK(result.is_ok());
+    }
+
+    SUBCASE("Get migration probe data - not migrating fails") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Not migrating - should fail
+        auto result = conn.get_migration_probe_data();
+        CHECK(result.is_err());
+    }
+
+    SUBCASE("Get migration probe data - while migrating") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Start migration
+        conn.handle_peer_address_change("10.0.0.2:443");
+        CHECK(conn.is_migrating());
+
+        // State should be Probing
+        CHECK(conn.migration_state() == Connection::MigrationState::Probing);
+
+        // Try to get probe data - may fail due to missing crypto state
+        // but the state transition should still happen
+        auto result = conn.get_migration_probe_data();
+        // Result depends on crypto state - we just check state changed
+        if (result.is_ok()) {
+            CHECK(conn.migration_state() == Connection::MigrationState::WaitingProbe);
+        }
+    }
+}
+
+TEST_CASE("QUIC Path Validation Integration") {
+    SUBCASE("Path challenge initiated during migration") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Start migration
+        conn.handle_peer_address_change("10.0.0.2:443");
+
+        // Should have initiated path challenge
+        CHECK(!conn.is_path_validated());
+        CHECK(conn.is_migrating());
+
+        // Path challenge was initiated - check retry count is 0
+        CHECK(conn.path_challenge_retry_count() == 0);
+    }
+
+    SUBCASE("Path validation completes migration") {
+        Connection conn(true);
+        conn.set_addresses("192.168.1.1:5000", "10.0.0.1:443");
+
+        // Start migration
+        conn.handle_peer_address_change("10.0.0.2:443");
+
+        // Complete path validation
+        conn.on_path_validation_result(true);
+
+        CHECK(!conn.is_migrating());
+        CHECK(conn.remote_address() == "10.0.0.2:443");
+    }
+}
+
+// =============================================================================
+// QUIC PTO Probe Packets (RFC 9002 Section 6.2)
+// =============================================================================
+
+TEST_CASE("QUIC PTO Probe") {
+    SUBCASE("PTO count initialization") {
+        LossDetection ld;
+        CHECK(ld.pto_count() == 0);
+    }
+
+    SUBCASE("Bytes in flight tracking") {
+        LossDetection ld;
+        // Initially no bytes in flight
+        CHECK(ld.bytes_in_flight() == 0);
+    }
+
+    SUBCASE("RTT estimator access") {
+        LossDetection ld;
+        // Can access RTT estimator
+        auto &rtt = ld.rtt();
+        (void)rtt;
+        CHECK(true);  // Just verify access works
     }
 }

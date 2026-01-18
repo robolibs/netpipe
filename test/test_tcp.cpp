@@ -1,6 +1,6 @@
 #include <chrono>
 #include <doctest/doctest.h>
-#include <netpipe/stream/tcp.hpp>
+#include <netpipe/transport/stream/tcp.hpp>
 #include <thread>
 
 TEST_CASE("TcpStream - Basic connection") {

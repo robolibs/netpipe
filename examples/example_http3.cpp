@@ -9,8 +9,8 @@
 
 #include <chrono>
 #include <echo/echo.hpp>
-#include <netpipe/http3.hpp>
-#include <netpipe/quic.hpp>
+#include <netpipe/protocol/http3.hpp>
+#include <netpipe/transport/stream/quic.hpp>
 #include <thread>
 
 using namespace netpipe;

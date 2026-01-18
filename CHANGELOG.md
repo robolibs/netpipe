@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.10] - 2026-01-18
+
+### <!-- 0 -->⛰️  Features
+
+- Implement HTTP/3 and QUIC connection management
+- Refactor Netpipe internal header structure
+- Implement basic HTTP/3 protocol
+- Add initial QUIC protocol implementation
+
+### <!-- 3 -->📚 Documentation
+
+- Add TLS 1.3 encryption documentation and example
+- Add TLS 1.3 encryption documentation and example
+
 ## [0.0.9] - 2026-01-17
 
 ### <!-- 0 -->⛰️  Features

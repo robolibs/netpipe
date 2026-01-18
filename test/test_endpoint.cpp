@@ -1,5 +1,5 @@
 #include <doctest/doctest.h>
-#include <netpipe/endpoint.hpp>
+#include <netpipe/core/endpoint.hpp>
 
 TEST_CASE("TcpEndpoint") {
     SUBCASE("Create and convert to string") {

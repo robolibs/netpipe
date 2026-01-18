@@ -8,8 +8,8 @@
 /// 4. Encrypted messages are exchanged
 
 #include <chrono>
-#include <netpipe/stream/tcp.hpp>
-#include <netpipe/tls.hpp>
+#include <netpipe/transport/stream/tcp.hpp>
+#include <netpipe/security/tls.hpp>
 #include <thread>
 
 #include <keylock/cert/builder.hpp>
