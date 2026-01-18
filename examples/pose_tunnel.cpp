@@ -50,7 +50,7 @@ void server() {
     echo::info("✓ TAP interface ready: tap0").green();
 
     // Assign IP
-    system("sudo ip addr add 10.0.0.1/24 dev tap0 2>/dev/null");
+    (void)system("sudo ip addr add 10.0.0.1/24 dev tap0 2>/dev/null");
 
     // Step 2: Create Ethernet endpoint
     wirebit::MacAddr local_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
@@ -179,7 +179,7 @@ void client() {
     echo::info("✓ TAP interface ready: tap1").green();
 
     // Assign IP
-    system("sudo ip addr add 10.0.0.2/24 dev tap1 2>/dev/null");
+    (void)system("sudo ip addr add 10.0.0.2/24 dev tap1 2>/dev/null");
 
     // Step 2: Create Ethernet endpoint
     wirebit::MacAddr local_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x02};
