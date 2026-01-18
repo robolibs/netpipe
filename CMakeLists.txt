@@ -4,7 +4,7 @@ cmake_minimum_required(VERSION 3.15)
 # Project configuration
 # ==================================================================================================
 set(PROJECT_NAME netpipe)
-set(PROJECT_VERSION "0.0.10")
+set(PROJECT_VERSION "0.0.11")
 
 # Dependencies formats:
 #   Git:    set(LIB_DEPS "name|https://github.com/org/repo.git|tag" ...)
@@ -13,7 +13,7 @@ set(PROJECT_VERSION "0.0.10")
 set(LIB_DEPS
     "echo|https://github.com/bresilla/echo.git|0.0.23"
     "datapod|https://github.com/robolibs/datapod.git|0.0.37"
-    "keylock|https://github.com/robolibs/keylock.git|0.0.10"
+    "keylock|https://github.com/robolibs/keylock.git|0.0.12"
 )
 set(EXAMPLE_DEPS
     "wirebit|https://github.com/robolibs/wirebit.git|0.0.9"
