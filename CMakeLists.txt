@@ -13,7 +13,7 @@ set(PROJECT_VERSION "0.0.11")
 set(LIB_DEPS
     "echo|https://github.com/bresilla/echo.git|0.0.23"
     "datapod|https://github.com/robolibs/datapod.git|0.0.37"
-    "keylock|https://github.com/robolibs/keylock.git|0.0.12"
+    "keylock|https://github.com/robolibs/keylock.git|0.0.14"
 )
 set(EXAMPLE_DEPS
     "wirebit|https://github.com/robolibs/wirebit.git|0.0.9"
@@ -64,7 +64,7 @@ cmake_policy(SET CMP0135 NEW)
 
 # Compiler-specific flags
 set(COMMON_FLAGS -Wall -Wextra -Wpedantic -Wno-reorder -Wno-narrowing -Wno-array-bounds
-    -Wno-unused-variable -Wno-unused-parameter -Wno-unused-but-set-variable -Wno-unused-result -Wno-gnu-line-marker)
+    -Wno-unused-variable -Wno-unused-parameter -Wno-unused-but-set-variable -Wno-gnu-line-marker)
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
     add_compile_options(${COMMON_FLAGS} -Wno-stringop-overflow)
@@ -91,12 +91,11 @@ if(${PROJECT_NAME_UPPER}_ENABLE_SIMD)
     endif()
 else()
     # Define macro to disable SIMD in the code
-    add_compile_definitions(FARMTRAX_SIMD_DISABLED)
+    add_compile_definitions(DATAPOD_SIMD_DISABLED)
     message(STATUS "SIMD optimizations disabled")
 endif()
 option(${PROJECT_NAME_UPPER}_BUILD_EXAMPLES "Build examples" OFF)
 option(${PROJECT_NAME_UPPER}_ENABLE_TESTS "Enable tests" OFF)
-option(${PROJECT_NAME_UPPER}_BIG_TRANSFER "Enable 100MB+ transfer tests (slow)" OFF)
 option(SHORT_NAMESPACE "Enable short namespace alias" ON)
 option(EXPOSE_ALL "Expose all submodule functions in namespace" OFF)
 
@@ -227,8 +226,7 @@ if(${PROJECT_NAME_UPPER}_ENABLE_TESTS)
     foreach(src_file IN LISTS test_sources)
         get_filename_component(test_name "${src_file}" NAME_WE)
         add_executable(${test_name} "${src_file}")
-        target_compile_definitions(${test_name} PRIVATE SHORT_NAMESPACE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN PROJECT_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
-            $<$<BOOL:${${PROJECT_NAME_UPPER}_BIG_TRANSFER}>:BIG_TRANSFER>)
+        target_compile_definitions(${test_name} PRIVATE SHORT_NAMESPACE DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN PROJECT_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
         target_link_libraries(${test_name} ${PROJECT_NAME}::${PROJECT_NAME} ${ALL_TEST_DEPS})
         add_test(NAME ${test_name} COMMAND ${test_name})
     endforeach()

@@ -83,31 +83,6 @@ pkg_check_modules(SODIUM REQUIRED libsodium)
 target_link_libraries(your_target PRIVATE ${SODIUM_LIBRARIES})
 ```
 
-### Recommended: XMake
-
-[XMake](https://xmake.io/) is a modern, fast, and cross-platform build system.
-
-**Install XMake:**
-```bash
-curl -fsSL https://xmake.io/shget.text | bash
-```
-
-**Add to your xmake.lua:**
-```lua
-add_requires("netpipe")
-
-target("your_target")
-    set_kind("binary")
-    add_packages("netpipe")
-    add_files("src/*.cpp")
-```
-
-**Build:**
-```bash
-xmake
-xmake run
-```
-
 ## Usage
 
 ### TCP Stream
@@ -430,8 +405,7 @@ make clean    # Clean build artifacts
 
 **Build system options:**
 ```bash
-BUILD_SYSTEM=cmake make build   # Use CMake
-BUILD_SYSTEM=xmake make build   # Use XMake (default)
+BUILD_SYSTEM=cmake make build   # Use CMake (default)
 BUILD_SYSTEM=zig make build     # Use Zig
 ```
 
@@ -449,20 +423,20 @@ The `examples/` directory contains:
 
 **Run examples:**
 ```bash
-./build/linux/x86_64/release/tcp_echo_server
-./build/linux/x86_64/release/tcp_echo_client
+./build/tcp_echo_server
+./build/tcp_echo_client
 
 # TLS encrypted communication
-./build/linux/x86_64/release/example_tls
+./build/example_tls
 
-./build/linux/x86_64/release/udp_broadcast
+./build/udp_broadcast
 
-./build/linux/x86_64/release/rpc_example server
-./build/linux/x86_64/release/rpc_example client
+./build/rpc_example server
+./build/rpc_example client
 
 # TAP tunnel (requires sudo and wirebit)
-sudo ./build/linux/x86_64/release/tap_tunnel server
-sudo ./build/linux/x86_64/release/tap_tunnel client
+sudo ./build/tap_tunnel server
+sudo ./build/tap_tunnel client
 # Then: ping 10.0.0.2, tcpdump -i tap0, ip link show tap0
 ```
 
