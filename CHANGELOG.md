@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.14] - 2026-01-18
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Refactor CMake project configuration
+
 ## [0.0.13] - 2026-01-18
 
 ### <!-- 0 -->⛰️  Features
