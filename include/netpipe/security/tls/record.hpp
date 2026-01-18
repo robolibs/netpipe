@@ -6,7 +6,8 @@
 #include <keylock/crypto/context.hpp>
 #include <netpipe/security/tls/key_schedule.hpp>
 
-#include <sodium.h>
+#include <keylock/crypto/aead_aes256gcm/aead.hpp>
+#include <keylock/crypto/aead_chacha20poly1305_ietf/aead.hpp>
 
 namespace netpipe::tls {
 
@@ -210,7 +211,7 @@ namespace netpipe::tls {
 
             // Need to prepend nonce to plaintext for keylock's encrypt API
             // Actually, looking at keylock API, it generates random nonce internally
-            // We need to use the raw libsodium API or modify our approach
+            // Use keylock's AEAD APIs directly
 
             // Encrypt using the selected cipher
             std::vector<uint8_t> ciphertext(inner_plaintext.size() + AEAD_TAG_SIZE);
@@ -220,16 +221,16 @@ namespace netpipe::tls {
             int ret;
             if (cipher_suite == CipherSuite::AES_256_GCM || cipher_suite == CipherSuite::AES_128_GCM) {
                 // Use AES-GCM (requires hardware support)
-                if (!crypto_aead_aes256gcm_is_available()) {
+                if (!keylock::crypto::aead_aes256gcm::is_available()) {
                     echo::error("AES-GCM not available on this hardware");
                     return dp::result::err(dp::Error::io_error("AES-GCM not available"));
                 }
-                ret = crypto_aead_aes256gcm_encrypt(ciphertext.data(), &ciphertext_len, plaintext_std.data(),
-                                                    plaintext_std.size(), aad_std.data(), aad_std.size(), nullptr,
-                                                    nonce_std.data(), key_std.data());
+                ret = keylock::crypto::aead_aes256gcm::encrypt(ciphertext.data(), &ciphertext_len, plaintext_std.data(),
+                                                               plaintext_std.size(), aad_std.data(), aad_std.size(),
+                                                               nullptr, nonce_std.data(), key_std.data());
             } else {
                 // Use ChaCha20-Poly1305 (default, software implementation)
-                ret = crypto_aead_chacha20poly1305_ietf_encrypt(
+                ret = keylock::crypto::aead_chacha20poly1305_ietf::encrypt(
                     ciphertext.data(), &ciphertext_len, plaintext_std.data(), plaintext_std.size(), aad_std.data(),
                     aad_std.size(), nullptr, nonce_std.data(), key_std.data());
             }
@@ -325,18 +326,18 @@ namespace netpipe::tls {
             int ret;
             if (cipher_suite == CipherSuite::AES_256_GCM || cipher_suite == CipherSuite::AES_128_GCM) {
                 // Use AES-GCM
-                if (!crypto_aead_aes256gcm_is_available()) {
+                if (!keylock::crypto::aead_aes256gcm::is_available()) {
                     echo::error("AES-GCM not available on this hardware");
                     return dp::result::err(dp::Error::io_error("AES-GCM not available"));
                 }
-                ret = crypto_aead_aes256gcm_decrypt(plaintext.data(), &plaintext_len, nullptr, ciphertext.data(),
-                                                    ciphertext.size(), aad_std.data(), aad_std.size(), nonce_std.data(),
-                                                    key_std.data());
+                ret = keylock::crypto::aead_aes256gcm::decrypt(plaintext.data(), &plaintext_len, nullptr,
+                                                               ciphertext.data(), ciphertext.size(), aad_std.data(),
+                                                               aad_std.size(), nonce_std.data(), key_std.data());
             } else {
                 // Use ChaCha20-Poly1305
-                ret = crypto_aead_chacha20poly1305_ietf_decrypt(plaintext.data(), &plaintext_len, nullptr,
-                                                                ciphertext.data(), ciphertext.size(), aad_std.data(),
-                                                                aad_std.size(), nonce_std.data(), key_std.data());
+                ret = keylock::crypto::aead_chacha20poly1305_ietf::decrypt(
+                    plaintext.data(), &plaintext_len, nullptr, ciphertext.data(), ciphertext.size(), aad_std.data(),
+                    aad_std.size(), nonce_std.data(), key_std.data());
             }
 
             if (ret != 0) {

@@ -2,10 +2,12 @@
 
 #include <datapod/datapod.hpp>
 #include <echo/echo.hpp>
+#include <keylock/crypto/aead_chacha20poly1305_ietf/aead.hpp>
+#include <keylock/crypto/chacha20/chacha20.hpp>
 #include <keylock/crypto/common.hpp>
+#include <keylock/hash/hmac/hmac_sha256.hpp>
 #include <netpipe/transport/stream/quic/packet.hpp>
 #include <netpipe/transport/stream/quic/types.hpp>
-#include <sodium.h>
 
 namespace netpipe::quic {
 
@@ -41,12 +43,12 @@ namespace netpipe::quic {
     // HKDF-Extract (uses HMAC-SHA256)
     inline dp::Vector<dp::u8> hkdf_extract(const dp::u8 *salt, dp::usize salt_len, const dp::u8 *ikm,
                                            dp::usize ikm_len) {
-        dp::Vector<dp::u8> prk(crypto_auth_hmacsha256_BYTES);
+        dp::Vector<dp::u8> prk(keylock::hash::hmac_sha256::BYTES);
 
-        crypto_auth_hmacsha256_state state;
-        crypto_auth_hmacsha256_init(&state, salt, salt_len);
-        crypto_auth_hmacsha256_update(&state, ikm, ikm_len);
-        crypto_auth_hmacsha256_final(&state, prk.data());
+        keylock::hash::hmac_sha256::Context state;
+        keylock::hash::hmac_sha256::init(&state, salt, salt_len);
+        keylock::hash::hmac_sha256::update(&state, ikm, ikm_len);
+        keylock::hash::hmac_sha256::final(&state, prk.data());
 
         return prk;
     }
@@ -84,17 +86,17 @@ namespace netpipe::quic {
         dp::u8 counter = 1;
 
         while (okm.size() < length) {
-            crypto_auth_hmacsha256_state state;
-            crypto_auth_hmacsha256_init(&state, secret.data(), secret.size());
+            keylock::hash::hmac_sha256::Context state;
+            keylock::hash::hmac_sha256::init(&state, secret.data(), secret.size());
 
             if (!t.empty()) {
-                crypto_auth_hmacsha256_update(&state, t.data(), t.size());
+                keylock::hash::hmac_sha256::update(&state, t.data(), t.size());
             }
-            crypto_auth_hmacsha256_update(&state, hkdf_label.data(), hkdf_label.size());
-            crypto_auth_hmacsha256_update(&state, &counter, 1);
+            keylock::hash::hmac_sha256::update(&state, hkdf_label.data(), hkdf_label.size());
+            keylock::hash::hmac_sha256::update(&state, &counter, 1);
 
-            t.resize(crypto_auth_hmacsha256_BYTES);
-            crypto_auth_hmacsha256_final(&state, t.data());
+            t.resize(keylock::hash::hmac_sha256::BYTES);
+            keylock::hash::hmac_sha256::final(&state, t.data());
 
             dp::usize copy_len = std::min(t.size(), length - okm.size());
             okm.insert(okm.end(), t.begin(), t.begin() + copy_len);
@@ -358,9 +360,9 @@ namespace netpipe::quic {
             unsigned long long ciphertext_len;
 
             // Use ChaCha20-Poly1305 for encryption
-            if (crypto_aead_chacha20poly1305_ietf_encrypt(ciphertext.data(), &ciphertext_len, payload.data(),
-                                                          payload.size(), header.data(), header.size(), nullptr,
-                                                          nonce.data(), keys_.key.data()) != 0) {
+            if (keylock::crypto::aead_chacha20poly1305_ietf::encrypt(ciphertext.data(), &ciphertext_len, payload.data(),
+                                                                     payload.size(), header.data(), header.size(),
+                                                                     nullptr, nonce.data(), keys_.key.data()) != 0) {
                 return dp::result::err(dp::Error::io_error("encryption failed"));
             }
 
@@ -384,9 +386,9 @@ namespace netpipe::quic {
             dp::Vector<dp::u8> plaintext(ciphertext.size() - AEAD_TAG_LENGTH);
             unsigned long long plaintext_len;
 
-            if (crypto_aead_chacha20poly1305_ietf_decrypt(plaintext.data(), &plaintext_len, nullptr, ciphertext.data(),
-                                                          ciphertext.size(), header.data(), header.size(), nonce.data(),
-                                                          keys_.key.data()) != 0) {
+            if (keylock::crypto::aead_chacha20poly1305_ietf::decrypt(
+                    plaintext.data(), &plaintext_len, nullptr, ciphertext.data(), ciphertext.size(), header.data(),
+                    header.size(), nonce.data(), keys_.key.data()) != 0) {
                 return dp::result::err(dp::Error::io_error("decryption failed"));
             }
 
@@ -426,7 +428,7 @@ namespace netpipe::quic {
 
             // Generate keystream
             dp::u8 zeros[5] = {0};
-            crypto_stream_chacha20_ietf_xor_ic(mask.data(), zeros, 5, nonce, counter, hp_key_.data());
+            keylock::crypto::chacha20::chacha20_ietf(mask.data(), zeros, 5, hp_key_.data(), nonce, counter);
 
             return mask;
         }

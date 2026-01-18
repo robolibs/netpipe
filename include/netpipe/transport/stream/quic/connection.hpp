@@ -6,6 +6,7 @@
 #include <deque>
 #include <echo/echo.hpp>
 #include <keylock/crypto/common.hpp>
+#include <keylock/hash/hmac/hmac_sha256.hpp>
 #include <netpipe/transport/stream/quic/ack_manager.hpp>
 #include <netpipe/transport/stream/quic/congestion_control.hpp>
 #include <netpipe/transport/stream/quic/crypto.hpp>
@@ -1366,8 +1367,9 @@ namespace netpipe::quic {
       private:
         // Compute HMAC-SHA256 for token validation
         dp::Vector<dp::u8> compute_token_hmac(const dp::Vector<dp::u8> &data) const {
-            dp::Vector<dp::u8> hmac(crypto_auth_hmacsha256_BYTES);
-            crypto_auth_hmacsha256(hmac.data(), data.data(), data.size(), token_secret_.data());
+            dp::Vector<dp::u8> hmac(keylock::hash::hmac_sha256::BYTES);
+            keylock::hash::hmac_sha256::hmac(hmac.data(), token_secret_.data(), token_secret_.size(), data.data(),
+                                             data.size());
             return hmac;
         }
 
