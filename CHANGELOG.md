@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.13] - 2026-01-18
+
+### <!-- 0 -->⛰️  Features
+
+- Integrate Keylock for cryptographic operations
+
 ## [0.0.12] - 2026-01-18
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
