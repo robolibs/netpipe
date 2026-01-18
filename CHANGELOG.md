@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.11] - 2026-01-18
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Bump keylock version to 0.0.12
+
 ## [0.0.10] - 2026-01-18
 
 ### <!-- 0 -->⛰️  Features
