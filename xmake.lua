@@ -10,7 +10,7 @@ local PROJECT_VERSION = "0.0.9"
 --   System: "pkgconfig::libname" or {system = "boost"}
 local LIB_DEPS = {
     {"echo", "https://github.com/bresilla/echo.git", "0.0.23"},
-    {"datapod", "https://github.com/robolibs/datapod.git", "0.0.34"},
+    {"datapod", "https://github.com/robolibs/datapod.git", "0.0.37"},
     {"keylock", "https://github.com/robolibs/keylock.git", "0.0.10"},
     "pkgconfig::libsodium",
 }

@@ -356,6 +356,168 @@ namespace netpipe::tls {
         }
     };
 
+    // PSK Identity (for pre_shared_key extension)
+    struct PskIdentity {
+        dp::Vector<dp::u8> identity;   // Ticket or external PSK identity
+        dp::u32 obfuscated_ticket_age; // For session tickets
+
+        dp::Vector<dp::u8> serialize() const {
+            dp::Vector<dp::u8> result;
+            result.reserve(2 + identity.size() + 4);
+
+            // Identity length (2 bytes)
+            result.push_back(static_cast<dp::u8>((identity.size() >> 8) & 0xFF));
+            result.push_back(static_cast<dp::u8>(identity.size() & 0xFF));
+
+            // Identity data
+            result.insert(result.end(), identity.begin(), identity.end());
+
+            // Obfuscated ticket age (4 bytes)
+            result.push_back(static_cast<dp::u8>((obfuscated_ticket_age >> 24) & 0xFF));
+            result.push_back(static_cast<dp::u8>((obfuscated_ticket_age >> 16) & 0xFF));
+            result.push_back(static_cast<dp::u8>((obfuscated_ticket_age >> 8) & 0xFF));
+            result.push_back(static_cast<dp::u8>(obfuscated_ticket_age & 0xFF));
+
+            return result;
+        }
+
+        static dp::Res<std::pair<PskIdentity, dp::usize>> parse(const dp::u8 *data, dp::usize size) {
+            if (size < 6) { // 2 (len) + minimum identity + 4 (age)
+                return dp::result::err(dp::Error::invalid_argument("PSK identity too short"));
+            }
+
+            dp::u16 identity_len = (static_cast<dp::u16>(data[0]) << 8) | data[1];
+            if (size < static_cast<dp::usize>(2 + identity_len + 4)) {
+                return dp::result::err(dp::Error::invalid_argument("PSK identity truncated"));
+            }
+
+            PskIdentity psk;
+            psk.identity = dp::Vector<dp::u8>(data + 2, data + 2 + identity_len);
+            dp::usize age_offset = 2 + identity_len;
+            psk.obfuscated_ticket_age =
+                (static_cast<dp::u32>(data[age_offset]) << 24) | (static_cast<dp::u32>(data[age_offset + 1]) << 16) |
+                (static_cast<dp::u32>(data[age_offset + 2]) << 8) | static_cast<dp::u32>(data[age_offset + 3]);
+
+            return dp::result::ok(std::make_pair(std::move(psk), static_cast<dp::usize>(6 + identity_len)));
+        }
+    };
+
+    // Pre-Shared Key Extension (ClientHello)
+    struct PreSharedKeyClientHello {
+        dp::Vector<PskIdentity> identities;
+        dp::Vector<dp::Vector<dp::u8>> binders;
+
+        Extension serialize() const {
+            dp::Vector<dp::u8> data;
+
+            // Serialize identities
+            dp::Vector<dp::u8> identities_data;
+            for (const auto &id : identities) {
+                auto id_bytes = id.serialize();
+                identities_data.insert(identities_data.end(), id_bytes.begin(), id_bytes.end());
+            }
+
+            // Identities length (2 bytes)
+            data.push_back(static_cast<dp::u8>((identities_data.size() >> 8) & 0xFF));
+            data.push_back(static_cast<dp::u8>(identities_data.size() & 0xFF));
+            data.insert(data.end(), identities_data.begin(), identities_data.end());
+
+            // Serialize binders
+            dp::Vector<dp::u8> binders_data;
+            for (const auto &binder : binders) {
+                binders_data.push_back(static_cast<dp::u8>(binder.size()));
+                binders_data.insert(binders_data.end(), binder.begin(), binder.end());
+            }
+
+            // Binders length (2 bytes)
+            data.push_back(static_cast<dp::u8>((binders_data.size() >> 8) & 0xFF));
+            data.push_back(static_cast<dp::u8>(binders_data.size() & 0xFF));
+            data.insert(data.end(), binders_data.begin(), binders_data.end());
+
+            return Extension{ExtensionType::PreSharedKey, std::move(data)};
+        }
+
+        static dp::Res<PreSharedKeyClientHello> parse(const dp::Vector<dp::u8> &data) {
+            if (data.size() < 4) {
+                return dp::result::err(dp::Error::invalid_argument("pre_shared_key extension too short"));
+            }
+
+            PreSharedKeyClientHello ext;
+            dp::usize offset = 0;
+
+            // Parse identities
+            dp::u16 identities_len = (static_cast<dp::u16>(data[offset]) << 8) | data[offset + 1];
+            offset += 2;
+
+            if (data.size() < offset + identities_len + 2) {
+                return dp::result::err(dp::Error::invalid_argument("pre_shared_key identities truncated"));
+            }
+
+            dp::usize identities_end = offset + identities_len;
+            while (offset < identities_end) {
+                auto result = PskIdentity::parse(data.data() + offset, data.size() - offset);
+                if (result.is_err()) {
+                    return dp::result::err(result.error());
+                }
+                auto [identity, consumed] = std::move(result.value());
+                ext.identities.push_back(std::move(identity));
+                offset += consumed;
+            }
+
+            // Parse binders
+            if (data.size() < offset + 2) {
+                return dp::result::err(dp::Error::invalid_argument("pre_shared_key binders missing"));
+            }
+
+            dp::u16 binders_len = (static_cast<dp::u16>(data[offset]) << 8) | data[offset + 1];
+            offset += 2;
+
+            if (data.size() < offset + binders_len) {
+                return dp::result::err(dp::Error::invalid_argument("pre_shared_key binders truncated"));
+            }
+
+            dp::usize binders_end = offset + binders_len;
+            while (offset < binders_end) {
+                if (offset >= data.size())
+                    break;
+                dp::u8 binder_len = data[offset];
+                offset++;
+                if (offset + binder_len > data.size()) {
+                    return dp::result::err(dp::Error::invalid_argument("pre_shared_key binder truncated"));
+                }
+                ext.binders.push_back(dp::Vector<dp::u8>(data.begin() + offset, data.begin() + offset + binder_len));
+                offset += binder_len;
+            }
+
+            if (ext.identities.size() != ext.binders.size()) {
+                return dp::result::err(dp::Error::invalid_argument("PSK identity/binder count mismatch"));
+            }
+
+            return dp::result::ok(std::move(ext));
+        }
+    };
+
+    // Pre-Shared Key Extension (ServerHello) - just the selected identity index
+    struct PreSharedKeyServerHello {
+        dp::u16 selected_identity;
+
+        Extension serialize() const {
+            dp::Vector<dp::u8> data;
+            data.push_back(static_cast<dp::u8>((selected_identity >> 8) & 0xFF));
+            data.push_back(static_cast<dp::u8>(selected_identity & 0xFF));
+            return Extension{ExtensionType::PreSharedKey, std::move(data)};
+        }
+
+        static dp::Res<PreSharedKeyServerHello> parse(const dp::Vector<dp::u8> &data) {
+            if (data.size() != 2) {
+                return dp::result::err(dp::Error::invalid_argument("pre_shared_key server extension malformed"));
+            }
+            PreSharedKeyServerHello ext;
+            ext.selected_identity = (static_cast<dp::u16>(data[0]) << 8) | data[1];
+            return dp::result::ok(std::move(ext));
+        }
+    };
+
     // Helper to serialize a list of extensions
     inline dp::Vector<dp::u8> serialize_extensions(const dp::Vector<Extension> &extensions) {
         dp::Vector<dp::u8> ext_data;

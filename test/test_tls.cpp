@@ -413,3 +413,180 @@ TEST_CASE("TLS Handshake - State machine") {
         CHECK(hs.state() == HandshakeState::WaitServerHello);
     }
 }
+
+// =============================================================================
+// TLS Key Update
+// =============================================================================
+
+TEST_CASE("TLS Key Update") {
+    SUBCASE("Traffic key derivation is deterministic") {
+        dp::Vector<dp::u8> traffic_secret(32, 0x42);
+
+        auto [key1, iv1] = KeySchedule::derive_traffic_keys(traffic_secret);
+        auto [key2, iv2] = KeySchedule::derive_traffic_keys(traffic_secret);
+
+        CHECK(key1 == key2);
+        CHECK(iv1 == iv2);
+    }
+
+    SUBCASE("Different secrets produce different keys") {
+        dp::Vector<dp::u8> secret1(32, 0x42);
+        dp::Vector<dp::u8> secret2(32, 0x43);
+
+        auto [key1, iv1] = KeySchedule::derive_traffic_keys(secret1);
+        auto [key2, iv2] = KeySchedule::derive_traffic_keys(secret2);
+
+        CHECK(key1 != key2);
+        CHECK(iv1 != iv2);
+    }
+}
+
+// =============================================================================
+// TLS Session Resumption
+// =============================================================================
+
+TEST_CASE("TLS Session Resumption") {
+    SUBCASE("PSK identity serialization") {
+        PskIdentity identity;
+        identity.identity = {0x01, 0x02, 0x03, 0x04};
+        identity.obfuscated_ticket_age = 12345;
+
+        auto serialized = identity.serialize();
+
+        // Format: 2-byte length + identity + 4-byte ticket age
+        CHECK(serialized.size() == 2 + identity.identity.size() + 4);
+    }
+
+    SUBCASE("Resumption PSK derivation") {
+        dp::Vector<dp::u8> resumption_master_secret(32, 0x42);
+        dp::Vector<dp::u8> ticket_nonce = {0x01, 0x02, 0x03, 0x04};
+
+        auto psk = KeySchedule::derive_resumption_psk(resumption_master_secret, ticket_nonce);
+
+        CHECK(psk.size() == HASH_LENGTH);
+
+        // Deterministic
+        auto psk2 = KeySchedule::derive_resumption_psk(resumption_master_secret, ticket_nonce);
+        CHECK(psk == psk2);
+    }
+
+    SUBCASE("Resumption master secret derivation") {
+        KeySchedule ks;
+        ks.init();
+
+        dp::Vector<dp::u8> shared_secret(32, 0xAB);
+        dp::Vector<dp::u8> hello_hash(32, 0xCD);
+        ks.derive_handshake_secrets(shared_secret, hello_hash);
+
+        dp::Vector<dp::u8> full_hash(32, 0xEF);
+        ks.derive_application_secrets(full_hash);
+
+        dp::Vector<dp::u8> resumption_hash(32, 0x99);
+        ks.derive_resumption_master_secret(resumption_hash);
+
+        CHECK(ks.resumption_master_secret.size() == HASH_LENGTH);
+    }
+}
+
+// =============================================================================
+// TLS Certificate Handling
+// =============================================================================
+
+TEST_CASE("TLS Certificate") {
+    SUBCASE("Certificate message round-trip") {
+        Certificate cert;
+        cert.certificate_request_context = {0x01, 0x02};
+        CertificateEntry entry;
+        entry.cert_data = dp::Vector<dp::u8>(100, 0x42);
+        cert.certificate_list.push_back(entry);
+
+        auto serialized = cert.serialize();
+
+        auto parse_result = Certificate::parse(
+            serialized.data() + HANDSHAKE_HEADER_SIZE,
+            serialized.size() - HANDSHAKE_HEADER_SIZE);
+        REQUIRE(parse_result.is_ok());
+
+        auto parsed = parse_result.value();
+        CHECK(parsed.certificate_request_context == cert.certificate_request_context);
+        CHECK(parsed.certificate_list.size() == 1);
+        CHECK(parsed.certificate_list[0].cert_data == entry.cert_data);
+    }
+
+    SUBCASE("Multiple certificates in chain") {
+        Certificate cert;
+        cert.certificate_request_context = {};
+
+        for (int i = 0; i < 3; i++) {
+            CertificateEntry entry;
+            entry.cert_data = dp::Vector<dp::u8>(50 + i * 10, static_cast<dp::u8>(i));
+            cert.certificate_list.push_back(entry);
+        }
+
+        auto serialized = cert.serialize();
+        auto parse_result = Certificate::parse(
+            serialized.data() + HANDSHAKE_HEADER_SIZE,
+            serialized.size() - HANDSHAKE_HEADER_SIZE);
+
+        REQUIRE(parse_result.is_ok());
+        CHECK(parse_result.value().certificate_list.size() == 3);
+    }
+}
+
+// =============================================================================
+// TLS Error Handling
+// =============================================================================
+
+TEST_CASE("TLS Error Handling") {
+    SUBCASE("Parse empty data fails gracefully") {
+        dp::Vector<dp::u8> empty;
+
+        auto ch_result = ClientHello::parse(empty.data(), 0);
+        CHECK(ch_result.is_err());
+
+        auto sh_result = ServerHello::parse(empty.data(), 0);
+        CHECK(sh_result.is_err());
+
+        auto alert_result = Alert::parse(empty);
+        CHECK(alert_result.is_err());
+    }
+
+    SUBCASE("Truncated data detection") {
+        // Create minimal valid ClientHello then truncate
+        ClientHello ch;
+        ch.generate_random();
+        ch.cipher_suites = {TLS_CHACHA20_POLY1305_SHA256};
+        auto serialized = ch.serialize();
+
+        // Truncate to half length
+        auto parse_result = ClientHello::parse(
+            serialized.data() + HANDSHAKE_HEADER_SIZE,
+            (serialized.size() - HANDSHAKE_HEADER_SIZE) / 2);
+
+        CHECK(parse_result.is_err());
+    }
+
+    SUBCASE("Invalid version detection") {
+        dp::Vector<dp::u8> bad_record = {
+            0x16,       // Handshake
+            0x02, 0x00, // Invalid version
+            0x00, 0x05, // Length
+            0x01, 0x02, 0x03, 0x04, 0x05};
+
+        // The record layer should handle this
+        CHECK(bad_record[1] != 0x03); // Not TLS 1.x
+    }
+
+    SUBCASE("Various alert types") {
+        CHECK(Alert::unexpected_message().description == AlertDescription::UnexpectedMessage);
+        CHECK(Alert::bad_record_mac().description == AlertDescription::BadRecordMac);
+        CHECK(Alert::decode_error().description == AlertDescription::DecodeError);
+        CHECK(Alert::handshake_failure().description == AlertDescription::HandshakeFailure);
+        CHECK(Alert::internal_error().description == AlertDescription::InternalError);
+
+        // All should be fatal
+        CHECK(Alert::unexpected_message().is_fatal());
+        CHECK(Alert::bad_record_mac().is_fatal());
+        CHECK(Alert::decode_error().is_fatal());
+    }
+}

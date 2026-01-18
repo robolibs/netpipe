@@ -115,6 +115,102 @@ namespace netpipe::quic {
         }
     };
 
+    // Frame types that need retransmission tracking
+    enum class RetransmittableFrameType : dp::u8 {
+        Crypto,        // CRYPTO frame: (offset, data)
+        Stream,        // STREAM frame: (stream_id, offset, data, fin)
+        MaxData,       // MAX_DATA: (max_data)
+        MaxStreamData, // MAX_STREAM_DATA: (stream_id, max_data)
+        MaxStreams,    // MAX_STREAMS: (max_streams, unidirectional)
+        ResetStream,   // RESET_STREAM: (stream_id, error, final_size)
+        StopSending,   // STOP_SENDING: (stream_id, error)
+        NewToken,      // NEW_TOKEN: (token)
+        HandshakeDone, // HANDSHAKE_DONE
+    };
+
+    // Info about a retransmittable frame
+    struct RetransmittableFrame {
+        RetransmittableFrameType type;
+
+        // For CRYPTO frame
+        dp::u64 crypto_offset = 0;
+        dp::Vector<dp::u8> crypto_data;
+
+        // For STREAM frame
+        dp::u64 stream_id = 0;
+        dp::u64 stream_offset = 0;
+        dp::Vector<dp::u8> stream_data;
+        bool stream_fin = false;
+
+        // For MAX_DATA
+        dp::u64 max_data = 0;
+
+        // For MAX_STREAM_DATA
+        dp::u64 max_stream_data = 0;
+
+        // For MAX_STREAMS
+        dp::u64 max_streams = 0;
+        bool max_streams_unidirectional = false;
+
+        // For RESET_STREAM
+        dp::u64 reset_error_code = 0;
+        dp::u64 reset_final_size = 0;
+
+        // For STOP_SENDING
+        dp::u64 stop_error_code = 0;
+
+        // For NEW_TOKEN
+        dp::Vector<dp::u8> token;
+
+        // Factory methods for creating frames
+        static RetransmittableFrame make_crypto(dp::u64 offset, dp::Vector<dp::u8> data) {
+            RetransmittableFrame f;
+            f.type = RetransmittableFrameType::Crypto;
+            f.crypto_offset = offset;
+            f.crypto_data = std::move(data);
+            return f;
+        }
+
+        static RetransmittableFrame make_stream(dp::u64 id, dp::u64 offset, dp::Vector<dp::u8> data, bool fin = false) {
+            RetransmittableFrame f;
+            f.type = RetransmittableFrameType::Stream;
+            f.stream_id = id;
+            f.stream_offset = offset;
+            f.stream_data = std::move(data);
+            f.stream_fin = fin;
+            return f;
+        }
+
+        static RetransmittableFrame make_max_data(dp::u64 max) {
+            RetransmittableFrame f;
+            f.type = RetransmittableFrameType::MaxData;
+            f.max_data = max;
+            return f;
+        }
+
+        static RetransmittableFrame make_max_stream_data(dp::u64 id, dp::u64 max) {
+            RetransmittableFrame f;
+            f.type = RetransmittableFrameType::MaxStreamData;
+            f.stream_id = id;
+            f.max_stream_data = max;
+            return f;
+        }
+
+        static RetransmittableFrame make_max_streams(dp::u64 max, bool unidirectional = false) {
+            RetransmittableFrame f;
+            f.type = RetransmittableFrameType::MaxStreams;
+            f.max_streams = max;
+            f.max_streams_unidirectional = unidirectional;
+            return f;
+        }
+
+        static RetransmittableFrame make_handshake_done() {
+            RetransmittableFrame f;
+            f.type = RetransmittableFrameType::HandshakeDone;
+            return f;
+        }
+    };
+
     // Information about a sent packet
     struct SentPacketInfo {
         dp::u64 packet_number = 0;
@@ -124,10 +220,44 @@ namespace netpipe::quic {
         bool ack_eliciting = false;
         bool in_flight = false;
 
-        // For retransmission tracking
-        bool crypto_data = false;       // Contains CRYPTO frames
-        bool stream_data = false;       // Contains STREAM frames
-        dp::Vector<dp::u64> stream_ids; // Stream IDs affected
+        // For retransmission tracking - detailed frame info
+        dp::Vector<RetransmittableFrame> frames;
+
+        // Convenience flags (derived from frames)
+        bool has_crypto_data() const {
+            for (const auto &f : frames) {
+                if (f.type == RetransmittableFrameType::Crypto)
+                    return true;
+            }
+            return false;
+        }
+
+        bool has_stream_data() const {
+            for (const auto &f : frames) {
+                if (f.type == RetransmittableFrameType::Stream)
+                    return true;
+            }
+            return false;
+        }
+
+        dp::Vector<dp::u64> get_stream_ids() const {
+            dp::Vector<dp::u64> ids;
+            for (const auto &f : frames) {
+                if (f.type == RetransmittableFrameType::Stream) {
+                    bool found = false;
+                    for (auto id : ids) {
+                        if (id == f.stream_id) {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if (!found) {
+                        ids.push_back(f.stream_id);
+                    }
+                }
+            }
+            return ids;
+        }
 
         // Mark as lost (for potential retransmission)
         bool declared_lost = false;
@@ -194,9 +324,15 @@ namespace netpipe::quic {
         // Get bytes in flight
         dp::u64 bytes_in_flight() const { return bytes_in_flight_; }
 
-        // Record a packet being sent
+        // Record a packet being sent (legacy interface for backwards compatibility)
         void on_packet_sent(PacketNumberSpace space, dp::u64 packet_number, dp::usize bytes, bool ack_eliciting,
-                            bool crypto_data = false, bool stream_data = false) {
+                            bool /* crypto_data */ = false, bool /* stream_data */ = false) {
+            on_packet_sent_with_frames(space, packet_number, bytes, ack_eliciting, {});
+        }
+
+        // Record a packet being sent with detailed frame tracking
+        void on_packet_sent_with_frames(PacketNumberSpace space, dp::u64 packet_number, dp::usize bytes,
+                                        bool ack_eliciting, dp::Vector<RetransmittableFrame> frames) {
             auto &pn_space = spaces_[static_cast<int>(space)];
 
             SentPacketInfo info;
@@ -206,8 +342,7 @@ namespace netpipe::quic {
             info.bytes_sent = bytes;
             info.ack_eliciting = ack_eliciting;
             info.in_flight = bytes > 0;
-            info.crypto_data = crypto_data;
-            info.stream_data = stream_data;
+            info.frames = std::move(frames);
 
             if (info.in_flight) {
                 bytes_in_flight_ += bytes;
@@ -220,7 +355,7 @@ namespace netpipe::quic {
             pn_space.sent_packets[packet_number] = std::move(info);
 
             echo::trace("Packet sent: space=", static_cast<int>(space), " pn=", packet_number, " bytes=", bytes,
-                        " ack_eliciting=", ack_eliciting);
+                        " ack_eliciting=", ack_eliciting, " frames=", info.frames.size());
         }
 
         // Process an ACK frame
@@ -360,9 +495,26 @@ namespace netpipe::quic {
             return result;
         }
 
+        // Extract frames needing retransmission from lost packets
+        // This should be called after detect_lost_packets() to get frames that need resending
+        static dp::Vector<RetransmittableFrame>
+        get_frames_for_retransmission(const dp::Vector<SentPacketInfo> &lost_packets) {
+            dp::Vector<RetransmittableFrame> frames_to_retransmit;
+
+            for (const auto &pkt : lost_packets) {
+                for (const auto &frame : pkt.frames) {
+                    frames_to_retransmit.push_back(frame);
+                }
+            }
+
+            echo::debug("Frames to retransmit: ", frames_to_retransmit.size(), " from ", lost_packets.size(),
+                        " lost packets");
+            return frames_to_retransmit;
+        }
+
         // Get the next timer deadline
         // Returns (has_timer, deadline)
-        std::pair<bool, std::chrono::steady_clock::time_point> get_loss_detection_timer() {
+        std::pair<bool, std::chrono::steady_clock::time_point> get_loss_detection_timer() const {
             auto now = std::chrono::steady_clock::now();
             std::chrono::steady_clock::time_point earliest_loss_time;
             bool has_loss_time = false;

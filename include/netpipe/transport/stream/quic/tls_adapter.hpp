@@ -541,9 +541,45 @@ namespace netpipe::quic {
                 // Detect pre_shared_key extension (indicates PSK-based resumption)
                 if (ext.type == tls::ExtensionType::PreSharedKey) {
                     found_psk = true;
-                    // TODO: Parse PSK identities and validate ticket
-                    // For now, just note that PSK was offered
                     echo::debug("Client offered PSK");
+
+                    // Parse PSK extension to extract identities and binders
+                    auto psk_result = tls::PreSharedKeyClientHello::parse(ext.data);
+                    if (psk_result.is_ok()) {
+                        auto &psk_ext = psk_result.value();
+                        echo::debug("PSK extension: ", psk_ext.identities.size(), " identities");
+
+                        // Try to validate each PSK identity (ticket)
+                        for (dp::usize i = 0; i < psk_ext.identities.size(); i++) {
+                            auto &identity = psk_ext.identities[i];
+                            auto validation = validate_psk_ticket(identity.identity, selected_cipher_suite_);
+
+                            if (validation.is_ok()) {
+                                auto &[psk, ticket_cipher] = validation.value();
+
+                                // Verify cipher suite matches
+                                if (ticket_cipher == selected_cipher_suite_) {
+                                    // Validate binder
+                                    if (validate_psk_binder(data, psk, psk_ext.binders[i])) {
+                                        psk_accepted_ = true;
+                                        selected_psk_index_ = static_cast<dp::u16>(i);
+                                        resumption_psk_ = std::move(psk);
+                                        echo::info("PSK accepted (index ", i, ")");
+                                        break;
+                                    } else {
+                                        echo::warn("PSK binder validation failed for identity ", i);
+                                    }
+                                } else {
+                                    echo::debug("PSK cipher suite mismatch: ticket=", ticket_cipher,
+                                                " selected=", selected_cipher_suite_);
+                                }
+                            } else {
+                                echo::debug("PSK ticket validation failed: ", validation.error().message.c_str());
+                            }
+                        }
+                    } else {
+                        echo::warn("Failed to parse PSK extension: ", psk_result.error().message.c_str());
+                    }
                 }
             }
 
@@ -570,6 +606,17 @@ namespace netpipe::quic {
             tls::KeyShareServerHello ks_ext;
             ks_ext.server_share = {tls::NamedGroup::X25519, our_x25519_public_};
             sh.extensions.push_back(ks_ext.serialize());
+
+            // Add pre_shared_key extension if PSK was accepted
+            if (psk_accepted_) {
+                tls::PreSharedKeyServerHello psk_sh;
+                psk_sh.selected_identity = selected_psk_index_;
+                sh.extensions.push_back(psk_sh.serialize());
+                echo::debug("Added pre_shared_key to ServerHello (selected_identity=", selected_psk_index_, ")");
+
+                // Initialize key schedule with PSK for proper key derivation
+                key_schedule_.init_with_psk(resumption_psk_);
+            }
 
             auto sh_bytes = sh.serialize();
             update_transcript(sh_bytes);
@@ -1008,6 +1055,11 @@ namespace netpipe::quic {
         bool client_offered_early_data_ = false;
         bool anti_replay_check_passed_ = false;
 
+        // PSK resumption state (server-side)
+        bool psk_accepted_ = false;
+        dp::u16 selected_psk_index_ = 0;
+        dp::Vector<dp::u8> resumption_psk_; // PSK derived from ticket
+
         // Generate X25519 keypair
         void generate_x25519_keypair() {
             our_x25519_public_.resize(crypto_scalarmult_BYTES);
@@ -1424,6 +1476,89 @@ namespace netpipe::quic {
             for (dp::usize i = 0; i < binder.size() && i < tls::HASH_LENGTH; i++) {
                 client_hello[binder_start + i] = binder[i];
             }
+        }
+
+        // SERVER: Validate a PSK ticket and extract the resumption PSK
+        // Returns: (psk, cipher_suite) on success
+        dp::Res<std::pair<dp::Vector<dp::u8>, dp::u16>> validate_psk_ticket(const dp::Vector<dp::u8> &ticket,
+                                                                            dp::u16 /* offered_cipher_suite */) {
+            // Ticket format: resumption_master_secret (32 bytes) + cipher_suite (2 bytes)
+            // In production, this should be encrypted and we'd decrypt here
+            if (ticket.size() < 34) {
+                return dp::result::err(dp::Error::invalid_argument("ticket too short"));
+            }
+
+            // Extract resumption_master_secret
+            dp::Vector<dp::u8> resumption_master_secret(ticket.begin(), ticket.begin() + 32);
+
+            // Extract cipher_suite
+            dp::u16 ticket_cipher = (static_cast<dp::u16>(ticket[32]) << 8) | ticket[33];
+
+            // Derive PSK from resumption_master_secret
+            // PSK = HKDF-Expand-Label(resumption_master_secret, "resumption", ticket_nonce, hash_len)
+            // Note: For simplicity, we use empty nonce here. In production, nonce should be part of ticket
+            dp::Vector<dp::u8> empty_nonce;
+            auto psk = tls::hkdf_expand_label(resumption_master_secret, "resumption", empty_nonce, tls::HASH_LENGTH);
+
+            echo::debug("Validated PSK ticket, cipher_suite=", ticket_cipher);
+            return dp::result::ok(std::make_pair(std::move(psk), ticket_cipher));
+        }
+
+        // SERVER: Validate PSK binder against ClientHello
+        bool validate_psk_binder(const dp::Vector<dp::u8> &client_hello, const dp::Vector<dp::u8> &psk,
+                                 const dp::Vector<dp::u8> &offered_binder) {
+            // Initialize early_secret from PSK for binder computation
+            tls::KeySchedule temp_ks;
+            temp_ks.init_with_psk(psk);
+
+            // Find where binders start in ClientHello
+            // The binders are at the end of the pre_shared_key extension
+            // We need to compute hash over ClientHello truncated before binders
+
+            // For a single binder: binders_len (2) + binder_len (1) + binder (32) = 35 bytes
+            dp::usize binder_size = 2 + 1 + offered_binder.size();
+            if (client_hello.size() < binder_size) {
+                echo::warn("ClientHello too short for binder validation");
+                return false;
+            }
+
+            dp::usize truncate_at = client_hello.size() - binder_size;
+            dp::Vector<dp::u8> truncated_ch(client_hello.begin(), client_hello.begin() + truncate_at);
+
+            // Compute transcript hash of truncated ClientHello
+            auto transcript_hash_val = tls::transcript_hash(truncated_ch);
+
+            // Derive binder_key from early_secret
+            auto binder_key =
+                tls::hkdf_expand_label(temp_ks.early_secret, "res binder", tls::empty_hash(), tls::HASH_LENGTH);
+
+            // Derive finished_key from binder_key
+            auto finished_key = tls::KeySchedule::derive_finished_key(binder_key);
+
+            // Compute expected binder = HMAC(finished_key, transcript_hash)
+            auto expected_binder = tls::Finished::compute_verify_data(finished_key, transcript_hash_val);
+
+            // Compare binders
+            if (offered_binder.size() != expected_binder.size()) {
+                echo::debug("Binder size mismatch: offered=", offered_binder.size(),
+                            " expected=", expected_binder.size());
+                return false;
+            }
+
+            bool match = true;
+            for (dp::usize i = 0; i < offered_binder.size(); i++) {
+                if (offered_binder[i] != expected_binder[i]) {
+                    match = false;
+                    break;
+                }
+            }
+
+            if (match) {
+                echo::debug("PSK binder validated successfully");
+            } else {
+                echo::debug("PSK binder mismatch");
+            }
+            return match;
         }
 
         // Create ticket data (server-side)
