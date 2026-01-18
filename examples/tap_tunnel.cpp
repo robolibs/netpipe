@@ -284,8 +284,8 @@ int main(int argc, char **argv) {
         tap_tunnel_client();
     } else if (mode == "cleanup") {
         echo::info("Cleaning up TAP interfaces...");
-        system("sudo ip link delete tap0 2>/dev/null");
-        system("sudo ip link delete tap1 2>/dev/null");
+        (void)system("sudo ip link delete tap0 2>/dev/null");
+        (void)system("sudo ip link delete tap1 2>/dev/null");
         echo::info("Cleanup complete!").green();
     } else {
         echo::error("Unknown mode: ", mode.c_str());

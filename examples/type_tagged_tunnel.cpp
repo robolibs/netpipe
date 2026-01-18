@@ -69,7 +69,7 @@ void server() {
     auto tap_link = std::make_shared<wirebit::TapLink>(std::move(tap_link_res.value()));
     echo::info("✓ TAP interface ready: tap0").green();
 
-    system("sudo ip addr add 10.0.0.1/24 dev tap0 2>/dev/null");
+    (void)system("sudo ip addr add 10.0.0.1/24 dev tap0 2>/dev/null");
 
     // Step 2: Create Ethernet endpoint
     wirebit::MacAddr local_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
@@ -204,7 +204,7 @@ void client() {
     auto tap_link = std::make_shared<wirebit::TapLink>(std::move(tap_link_res.value()));
     echo::info("✓ TAP interface ready: tap1").green();
 
-    system("sudo ip addr add 10.0.0.2/24 dev tap1 2>/dev/null");
+    (void)system("sudo ip addr add 10.0.0.2/24 dev tap1 2>/dev/null");
 
     // Step 2: Create Ethernet endpoint
     wirebit::MacAddr local_mac = {0x02, 0x00, 0x00, 0x00, 0x00, 0x02};
