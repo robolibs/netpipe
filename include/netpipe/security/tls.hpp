@@ -46,7 +46,6 @@
 //
 // Dependencies:
 // - keylock library (for cryptographic primitives)
-// - libsodium (via keylock)
 
 #include <netpipe/security/tls/alert.hpp>
 #include <netpipe/security/tls/extensions.hpp>

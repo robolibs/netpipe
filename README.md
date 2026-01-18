@@ -76,13 +76,6 @@ FetchContent_MakeAvailable(netpipe)
 target_link_libraries(your_target PRIVATE netpipe)
 ```
 
-**Note:** For TLS support, you also need libsodium:
-```cmake
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SODIUM REQUIRED libsodium)
-target_link_libraries(your_target PRIVATE ${SODIUM_LIBRARIES})
-```
-
 ## Usage
 
 ### TCP Stream

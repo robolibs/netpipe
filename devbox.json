@@ -9,9 +9,7 @@
     "rerun@latest",
     "zig@latest",
     "xmake@latest",
-    "gcc@13.3.0",
-    "libsodium@latest",
-    "libsodium.dev"
+    "gcc@13.3.0"
   ],
   "shell": {
     "init_hook": [

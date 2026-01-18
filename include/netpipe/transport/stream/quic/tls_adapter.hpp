@@ -17,7 +17,9 @@
 #include <netpipe/transport/stream/quic/varint.hpp>
 #include <unordered_set>
 
-#include <sodium.h>
+#include <keylock/crypto/aead_aes256gcm/aead.hpp>
+#include <keylock/crypto/box_seal_x25519/x25519.hpp>
+#include <keylock/crypto/rng/randombytes.hpp>
 
 namespace netpipe::quic {
 
@@ -192,7 +194,7 @@ namespace netpipe::quic {
             ch.legacy_session_id = dp::Vector<dp::u8>(session_id.begin(), session_id.end());
 
             // Cipher suites - QUIC prefers ChaCha20-Poly1305 for software implementations
-            if (crypto_aead_aes256gcm_is_available()) {
+            if (keylock::crypto::aead_aes256gcm::is_available()) {
                 ch.cipher_suites = {tls::TLS_AES_256_GCM_SHA384, tls::TLS_CHACHA20_POLY1305_SHA256};
             } else {
                 ch.cipher_suites = {tls::TLS_CHACHA20_POLY1305_SHA256};
@@ -480,7 +482,7 @@ namespace netpipe::quic {
 
             // Find supported cipher suite
             bool found_cipher = false;
-            bool aes_available = crypto_aead_aes256gcm_is_available();
+            bool aes_available = keylock::crypto::aead_aes256gcm::is_available();
 
             if (aes_available) {
                 for (auto cs : ch.cipher_suites) {
@@ -792,7 +794,7 @@ namespace netpipe::quic {
             ch.cipher_suites = {config_.session_ticket->cipher_suite};
 
             // Add other cipher suites as fallback
-            if (crypto_aead_aes256gcm_is_available()) {
+            if (keylock::crypto::aead_aes256gcm::is_available()) {
                 if (config_.session_ticket->cipher_suite != tls::TLS_AES_256_GCM_SHA384) {
                     ch.cipher_suites.push_back(tls::TLS_AES_256_GCM_SHA384);
                 }
@@ -1062,27 +1064,26 @@ namespace netpipe::quic {
 
         // Generate X25519 keypair
         void generate_x25519_keypair() {
-            our_x25519_public_.resize(crypto_scalarmult_BYTES);
-            our_x25519_private_.resize(crypto_scalarmult_SCALARBYTES);
+            our_x25519_public_.resize(keylock::crypto::x25519::PUBLICKEYBYTES);
+            our_x25519_private_.resize(keylock::crypto::x25519::SECRETKEYBYTES);
 
-            crypto_box_keypair(our_x25519_public_.data(), our_x25519_private_.data());
+            keylock::crypto::rng::randombytes_buf(our_x25519_private_.data(), our_x25519_private_.size());
+            keylock::crypto::x25519::public_key(our_x25519_public_.data(), our_x25519_private_.data());
 
             echo::debug("Generated X25519 keypair");
         }
 
         // Compute X25519 shared secret
         dp::Vector<dp::u8> compute_x25519_shared_secret() {
-            if (peer_x25519_public_.size() != crypto_scalarmult_BYTES) {
+            if (peer_x25519_public_.size() != keylock::crypto::x25519::PUBLICKEYBYTES) {
                 echo::error("Invalid peer X25519 public key size");
                 return {};
             }
 
-            dp::Vector<dp::u8> shared_secret(crypto_scalarmult_BYTES);
+            dp::Vector<dp::u8> shared_secret(keylock::crypto::x25519::PUBLICKEYBYTES);
 
-            if (crypto_scalarmult(shared_secret.data(), our_x25519_private_.data(), peer_x25519_public_.data()) != 0) {
-                echo::error("X25519 scalar multiplication failed");
-                return {};
-            }
+            keylock::crypto::x25519::scalarmult(shared_secret.data(), our_x25519_private_.data(),
+                                                peer_x25519_public_.data());
 
             echo::debug("Computed X25519 shared secret");
             return shared_secret;
