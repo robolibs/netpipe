@@ -1,5 +1,4 @@
 #include <chrono>
-#include <cstdio>
 #include <datapod/datapod.hpp>
 #include <netpipe/netpipe.hpp>
 #include <string>
@@ -31,8 +30,7 @@ int main() {
             netpipe::Remote<netpipe::Bidirect> rpc(*conn.get());
             (void)rpc.register_method(METHOD_ECHO, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
                 std::string s(req.begin(), req.end());
-                std::fprintf(stdout, "RPC got: %s\n", s.c_str());
-                std::fflush(stdout);
+                echo::info("RPC got: ", s.c_str());
                 return dp::result::ok(req);
             });
 
