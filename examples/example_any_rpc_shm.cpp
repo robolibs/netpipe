@@ -1,12 +1,15 @@
 #include <chrono>
+#include <cstdio>
+#include <datapod/datapod.hpp>
 #include <netpipe/netpipe.hpp>
+#include <string>
 #include <thread>
 
 static constexpr dp::u32 METHOD_ECHO = 1;
 
 int main() {
     // SHM + RPC example using AnyStream.
-    // Uses Remote<Bidirect> (automatic receiver thread) and performs a single call.
+    // Client sends a message via RPC; server prints it inside the handler.
     netpipe::AnyEndpoint endpoint = netpipe::AnyEndpoint::shm_endpoint("netpipe_any_rpc_shm", 64 * 1024);
 
     netpipe::AnyStream listener;
@@ -27,6 +30,9 @@ int main() {
         {
             netpipe::Remote<netpipe::Bidirect> rpc(*conn.get());
             (void)rpc.register_method(METHOD_ECHO, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+                std::string s(req.begin(), req.end());
+                std::fprintf(stdout, "RPC got: %s\n", s.c_str());
+                std::fflush(stdout);
                 return dp::result::ok(req);
             });
 
