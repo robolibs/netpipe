@@ -29,9 +29,11 @@ int main() {
         {
             netpipe::Remote<netpipe::Bidirect> rpc(*conn.get());
             (void)rpc.register_method(METHOD_ECHO, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
-                std::string s(req.begin(), req.end());
+                dp::String s(reinterpret_cast<const char *>(req.data()), req.size());
                 echo::info("RPC got: ", s.c_str());
-                return dp::result::ok(req);
+
+                netpipe::Message resp(s.begin(), s.end());
+                return dp::result::ok(std::move(resp));
             });
 
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -55,9 +57,15 @@ int main() {
     // Important: keep the stream alive longer than Remote (receiver thread).
     {
         netpipe::Remote<netpipe::Bidirect> rpc(*client.get());
-        netpipe::Message payload = {'h', 'e', 'l', 'l', 'o'};
+        dp::String text = "hello";
+        netpipe::Message payload(text.begin(), text.end());
         auto resp = rpc.call(METHOD_ECHO, payload, 5000);
-        ok = resp.is_ok() && resp.value() == payload;
+        if (resp.is_ok()) {
+            dp::String echoed(reinterpret_cast<const char *>(resp.value().data()), resp.value().size());
+            ok = echoed == text;
+        } else {
+            ok = false;
+        }
     }
 
     client.close();
