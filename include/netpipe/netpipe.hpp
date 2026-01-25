@@ -17,6 +17,9 @@
 #include <netpipe/transport/stream/shm.hpp>
 #include <netpipe/transport/stream/tcp.hpp>
 
+// Unified stream wrapper
+#include <netpipe/transport/any.hpp>
+
 // QUIC transport (UDP-based, multiplexed streams)
 #include <netpipe/transport/stream/quic.hpp>
 
