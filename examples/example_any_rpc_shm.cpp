@@ -5,9 +5,8 @@
 static constexpr dp::u32 METHOD_ECHO = 1;
 
 int main() {
-    // One-file SHM + RPC example using AnyStream.
-    // Server: listens on SHM, accepts one client, serves a single echo method.
-    // Client: connects, calls echo, validates response.
+    // SHM + RPC example using AnyStream.
+    // Uses Remote<Bidirect> (automatic receiver thread) and performs a single call.
     netpipe::AnyEndpoint endpoint = netpipe::AnyEndpoint::shm_endpoint("netpipe_any_rpc_shm", 64 * 1024);
 
     netpipe::AnyStream listener;
@@ -23,15 +22,17 @@ int main() {
         }
 
         auto conn = std::move(accept_res.value());
-        // Note: `serve()` exists only on Remote<Unidirect> in netpipe.
-        // For Bidirect, a receiver thread is started automatically by the constructor.
-        netpipe::Remote<netpipe::Bidirect> rpc(*conn.get());
 
-        (void)rpc.register_method(
-            METHOD_ECHO, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> { return dp::result::ok(req); });
+        // Important: keep the stream alive longer than Remote (receiver thread).
+        {
+            netpipe::Remote<netpipe::Bidirect> rpc(*conn.get());
+            (void)rpc.register_method(METHOD_ECHO, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
+                return dp::result::ok(req);
+            });
 
-        // Keep the server alive long enough for the client call.
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+
         conn.close();
     });
 
@@ -45,26 +46,19 @@ int main() {
         return 1;
     }
 
-    netpipe::Remote<netpipe::Bidirect> rpc(*client.get());
-    netpipe::Message payload = {'h', 'e', 'l', 'l', 'o'};
-    auto resp = rpc.call(METHOD_ECHO, payload, 5000);
-    if (resp.is_err()) {
-        client.close();
-        listener.close();
-        server_thread.join();
-        return 1;
-    }
+    bool ok = false;
 
-    // Expect exact echo.
-    if (resp.value() != payload) {
-        client.close();
-        listener.close();
-        server_thread.join();
-        return 1;
+    // Important: keep the stream alive longer than Remote (receiver thread).
+    {
+        netpipe::Remote<netpipe::Bidirect> rpc(*client.get());
+        netpipe::Message payload = {'h', 'e', 'l', 'l', 'o'};
+        auto resp = rpc.call(METHOD_ECHO, payload, 5000);
+        ok = resp.is_ok() && resp.value() == payload;
     }
 
     client.close();
     listener.close();
     server_thread.join();
-    return 0;
+
+    return ok ? 0 : 1;
 }
