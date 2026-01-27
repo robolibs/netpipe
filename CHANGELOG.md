@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.0.16] - 2026-01-27
+
+### <!-- 0 -->⛰️  Features
+
+- Add unified Pipe for transport-agnostic communication
+
+### Examples
+
+- Send dp::String over RPC in SHM example
+- Use echo logging in AnyStream SHM RPC
+- Print payload in AnyStream SHM RPC handler
+- Fix AnyStream SHM RPC shutdown
+- Add AnyStream SHM RPC example
+
 ## [0.0.15] - 2026-01-25
 
 ### Netpipe
