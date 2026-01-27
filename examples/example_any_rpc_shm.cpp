@@ -24,8 +24,6 @@ int main() {
         }
 
         auto conn = std::move(accept_res.value());
-
-        // Important: keep the stream alive longer than Remote (receiver thread).
         {
             netpipe::Remote<netpipe::Bidirect> rpc(*conn.get());
             (void)rpc.register_method(METHOD_ECHO, [](const netpipe::Message &req) -> dp::Res<netpipe::Message> {
