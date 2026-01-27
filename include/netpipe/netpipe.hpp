@@ -20,6 +20,9 @@
 // Unified stream wrapper
 #include <netpipe/transport/any.hpp>
 
+// High-level pipe (combines endpoint + stream)
+#include <netpipe/transport/pipe.hpp>
+
 // QUIC transport (UDP-based, multiplexed streams)
 #include <netpipe/transport/stream/quic.hpp>
 
@@ -40,6 +43,8 @@
 //   - netpipe::TcpEndpoint, UdpEndpoint, IpcEndpoint, ShmEndpoint, LoraEndpoint
 //   - netpipe::Stream (base class)
 //   - netpipe::TcpStream, IpcStream, ShmStream
+//   - netpipe::AnyEndpoint, AnyStream - type-erased wrappers
+//   - netpipe::Pipe - high-level pipe combining endpoint + stream
 //   - netpipe::QuicEndpoint, QuicStream - QUIC transport over UDP
 //   - netpipe::Datagram (base class)
 //   - netpipe::UdpDatagram, LoraDatagram
