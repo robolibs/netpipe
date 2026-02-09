@@ -31,6 +31,9 @@
 #include <netpipe/transport/datagram/udp.hpp>
 
 // Higher-level protocols
+#include <netpipe/protocol/http11.hpp>
+#include <netpipe/protocol/http2.hpp>
+#include <netpipe/protocol/http3.hpp>
 #include <netpipe/protocol/rpc.hpp>
 #include <netpipe/protocol/rpc/async.hpp>
 #include <netpipe/protocol/rpc/metrics.hpp>
@@ -48,5 +51,7 @@
 //   - netpipe::QuicEndpoint, QuicStream - QUIC transport over UDP
 //   - netpipe::Datagram (base class)
 //   - netpipe::UdpDatagram, LoraDatagram
+//   - netpipe::Http11Request, Http11Response
+//   - netpipe::Http2Request, Http2Response
 //   - netpipe::Remote<Unidirect> - Simple client-server RPC
 //   - netpipe::Remote<Bidirect> - Bidirectional peer-to-peer RPC with concurrency

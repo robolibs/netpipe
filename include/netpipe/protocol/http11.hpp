@@ -1,0 +1,11 @@
+#pragma once
+
+/// HTTP/1.1 protocol module (scaffold)
+
+#include <netpipe/protocol/http/common.hpp>
+#include <netpipe/protocol/http11/types.hpp>
+
+namespace netpipe {
+    using Http11Request = http11::Request;
+    using Http11Response = http11::Response;
+} // namespace netpipe
