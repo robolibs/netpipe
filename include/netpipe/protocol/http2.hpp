@@ -7,6 +7,7 @@
 #include <netpipe/protocol/http2/frame.hpp>
 #include <netpipe/protocol/http2/hpack.hpp>
 #include <netpipe/protocol/http2/settings.hpp>
+#include <netpipe/protocol/http2/stream.hpp>
 #include <netpipe/protocol/http2/types.hpp>
 
 namespace netpipe {
