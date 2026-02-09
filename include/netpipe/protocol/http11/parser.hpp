@@ -6,6 +6,12 @@
 
 namespace netpipe::http11 {
 
+    // RFC coverage notes (smoke-level, not full conformance):
+    // - Request/status line tokenization and HTTP/1.1 version checks
+    // - Header field-name validation via RFC7230 tchar subset
+    // - CRLF-terminated header block parsing
+    // - Optional lenient mode for LF normalization and obs-fold acceptance
+
     struct ParseOptions {
         bool strict = true;
         bool allow_obs_fold = false;

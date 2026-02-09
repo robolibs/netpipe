@@ -4,6 +4,12 @@
 
 namespace netpipe::http2 {
 
+    // RFC coverage notes (smoke-level, not full conformance):
+    // - 9-byte frame header parse/serialize and 24-bit length bounds
+    // - Stream ID 31-bit masking rules
+    // - Control-frame stream-0 constraints
+    // - Stream-frame non-zero stream-id constraints
+
     enum class FrameType : dp::u8 {
         Data = 0x0,
         Headers = 0x1,
