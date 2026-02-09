@@ -8,6 +8,7 @@ namespace netpipe::tls {
     // TLS 1.3 Extension Types (RFC 8446)
     enum class ExtensionType : dp::u16 {
         ServerName = 0,
+        ApplicationLayerProtocolNegotiation = 16,
         SupportedGroups = 10,
         SignatureAlgorithms = 13,
         PreSharedKey = 41,
@@ -200,6 +201,66 @@ namespace netpipe::tls {
             }
 
             return dp::result::ok(static_cast<dp::u16>((static_cast<dp::u16>(data[0]) << 8) | data[1]));
+        }
+    };
+
+    // ALPN extension (RFC 7301)
+    struct AlpnExtension {
+        dp::Vector<dp::String> protocols;
+
+        Extension serialize() const {
+            dp::Vector<dp::u8> protocol_list;
+            for (const auto &protocol : protocols) {
+                if (protocol.empty() || protocol.size() > 255) {
+                    continue;
+                }
+                protocol_list.push_back(static_cast<dp::u8>(protocol.size()));
+                protocol_list.insert(protocol_list.end(), protocol.begin(), protocol.end());
+            }
+
+            dp::Vector<dp::u8> data;
+            data.reserve(2 + protocol_list.size());
+            data.push_back(static_cast<dp::u8>((protocol_list.size() >> 8) & 0xFF));
+            data.push_back(static_cast<dp::u8>(protocol_list.size() & 0xFF));
+            data.insert(data.end(), protocol_list.begin(), protocol_list.end());
+
+            return Extension{ExtensionType::ApplicationLayerProtocolNegotiation, std::move(data)};
+        }
+
+        static dp::Res<AlpnExtension> parse(const dp::Vector<dp::u8> &data) {
+            if (data.size() < 2) {
+                return dp::result::err(dp::Error::invalid_argument("ALPN extension too short"));
+            }
+
+            dp::usize list_len = (static_cast<dp::u16>(data[0]) << 8) | data[1];
+            if (data.size() != list_len + 2) {
+                return dp::result::err(dp::Error::invalid_argument("ALPN protocol list length mismatch"));
+            }
+
+            AlpnExtension ext;
+            dp::usize offset = 2;
+            while (offset < data.size()) {
+                dp::usize len = data[offset++];
+                if (len == 0 || offset + len > data.size()) {
+                    return dp::result::err(dp::Error::invalid_argument("ALPN protocol entry malformed"));
+                }
+                ext.protocols.emplace_back(reinterpret_cast<const char *>(data.data() + offset), len);
+                offset += len;
+            }
+
+            return dp::result::ok(std::move(ext));
+        }
+
+        static dp::Optional<dp::String> negotiate(const dp::Vector<dp::String> &client_protocols,
+                                                  const dp::Vector<dp::String> &server_protocols) {
+            for (const auto &server_pref : server_protocols) {
+                for (const auto &client_offer : client_protocols) {
+                    if (server_pref == client_offer) {
+                        return server_pref;
+                    }
+                }
+            }
+            return dp::nullopt;
         }
     };
 
