@@ -1,5 +1,53 @@
 # Changelog
 
+## [0.0.17] - 2026-02-09
+
+### <!-- 0 -->⛰️  Features
+
+- Add unified HTTP protocol selector
+- Add ALPN negotiation for http11 and http2
+- Implement stream reset and connection shutdown
+- Add flow control and priority scheduling
+- Implement stream lifecycle and header reassembly
+- Add preface and settings state machine
+- Implement hpack static and dynamic tables
+- Implement core frame types and codec
+- Add interop modes and compatibility checks
+- Add stateful client/server connection helpers
+- Implement content-length and chunked body handling
+- Add request and response serialization
+- Add request/status line and header parser
+- Add stream adapter layer for HTTP protocols
+- Scaffold http11/http2 modules and shared HTTP foundation
+- Add unified Pipe for transport-agnostic communication
+
+### <!-- 3 -->📚 Documentation
+
+- Add phased plan for http11 and http2 implementation
+
+### <!-- 4 -->⚡ Performance
+
+- Add baseline throughput and memory sanity checks
+
+### <!-- 6 -->🧪 Testing
+
+- Add fuzz regression corpus and malformed input coverage
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Remove development plan document
+- Conformance sweep and final protocol stabilization
+- Refactor CMake configuration and remove netpipe
+
+### Examples
+
+- Add http11 and http2 usage demos
+- Send dp::String over RPC in SHM example
+- Use echo logging in AnyStream SHM RPC
+- Print payload in AnyStream SHM RPC handler
+- Fix AnyStream SHM RPC shutdown
+- Add AnyStream SHM RPC example
+
 ## [0.0.16] - 2026-01-27
 
 ### <!-- 0 -->⛰️  Features
