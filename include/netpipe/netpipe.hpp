@@ -34,6 +34,7 @@
 #include <netpipe/protocol/http11.hpp>
 #include <netpipe/protocol/http2.hpp>
 #include <netpipe/protocol/http3.hpp>
+#include <netpipe/protocol/http_selector.hpp>
 #include <netpipe/protocol/rpc.hpp>
 #include <netpipe/protocol/rpc/async.hpp>
 #include <netpipe/protocol/rpc/metrics.hpp>
