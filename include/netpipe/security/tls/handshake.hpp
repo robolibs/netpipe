@@ -63,6 +63,9 @@ namespace netpipe::tls {
 
         // Expected server hostname (for certificate hostname validation)
         dp::String expected_hostname;
+
+        // ALPN protocols in preference order (e.g. {"h2", "http/1.1"})
+        dp::Vector<dp::String> alpn_protocols;
     };
 
     // Handshake context - all state for an in-progress handshake
@@ -87,6 +90,9 @@ namespace netpipe::tls {
 
         // Check if in error state
         bool is_error() const { return state_ == HandshakeState::Error; }
+
+        // Selected ALPN protocol (if negotiated)
+        dp::Optional<dp::String> selected_alpn_protocol() const { return selected_alpn_protocol_; }
 
         // Get the record layer (for application data after handshake)
         RecordLayer &record_layer() { return record_; }
@@ -134,6 +140,13 @@ namespace netpipe::tls {
             KeyShareClientHello ks_ext;
             ks_ext.client_shares.push_back({NamedGroup::X25519, our_x25519_public_});
             ch.extensions.push_back(ks_ext.serialize());
+
+            // 5. ALPN
+            if (!config_.alpn_protocols.empty()) {
+                AlpnExtension alpn;
+                alpn.protocols = config_.alpn_protocols;
+                ch.extensions.push_back(alpn.serialize());
+            }
 
             // Serialize and update transcript
             auto ch_bytes = ch.serialize();
@@ -270,6 +283,44 @@ namespace netpipe::tls {
                     state_ = HandshakeState::Error;
                     return dp::result::err(dp::Error::invalid_argument("expected EncryptedExtensions"));
                 }
+
+                if (msg_length > 0) {
+                    auto ee_result = EncryptedExtensions::parse(msg_data, msg_length);
+                    if (ee_result.is_err()) {
+                        state_ = HandshakeState::Error;
+                        return dp::result::err(ee_result.error());
+                    }
+
+                    for (const auto &ext : ee_result.value().extensions) {
+                        if (ext.type == ExtensionType::ApplicationLayerProtocolNegotiation) {
+                            auto alpn_result = AlpnExtension::parse(ext.data);
+                            if (alpn_result.is_err()) {
+                                state_ = HandshakeState::Error;
+                                return dp::result::err(alpn_result.error());
+                            }
+                            if (alpn_result.value().protocols.size() != 1) {
+                                state_ = HandshakeState::Error;
+                                return dp::result::err(
+                                    dp::Error::invalid_argument("server ALPN must select one protocol"));
+                            }
+
+                            selected_alpn_protocol_ = alpn_result.value().protocols[0];
+                            bool found = false;
+                            for (const auto &offered : config_.alpn_protocols) {
+                                if (offered == selected_alpn_protocol_.value()) {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!config_.alpn_protocols.empty() && !found) {
+                                state_ = HandshakeState::Error;
+                                return dp::result::err(
+                                    dp::Error::invalid_argument("server selected ALPN protocol not offered by client"));
+                            }
+                        }
+                    }
+                }
+
                 update_transcript(plaintext);
                 state_ = HandshakeState::WaitCertificateOrCertificateRequest;
                 echo::debug("EncryptedExtensions received");
@@ -467,6 +518,7 @@ namespace netpipe::tls {
 
             // Find key_share extension with X25519
             bool found_key_share = false;
+            dp::Vector<dp::String> client_alpn_protocols;
             for (const auto &ext : ch.extensions) {
                 if (ext.type == ExtensionType::KeyShare) {
                     auto ks_result = KeyShareClientHello::parse(ext.data);
@@ -480,6 +532,11 @@ namespace netpipe::tls {
                             found_key_share = true;
                             break;
                         }
+                    }
+                } else if (ext.type == ExtensionType::ApplicationLayerProtocolNegotiation) {
+                    auto alpn_result = AlpnExtension::parse(ext.data);
+                    if (alpn_result.is_ok()) {
+                        client_alpn_protocols = alpn_result.value().protocols;
                     }
                 }
             }
@@ -548,6 +605,20 @@ namespace netpipe::tls {
 
             // EncryptedExtensions (encrypted)
             EncryptedExtensions ee;
+
+            if (!config_.alpn_protocols.empty() && !client_alpn_protocols.empty()) {
+                auto selected = AlpnExtension::negotiate(client_alpn_protocols, config_.alpn_protocols);
+                if (!selected.has_value()) {
+                    state_ = HandshakeState::Error;
+                    return dp::result::err(dp::Error::invalid_argument("no shared ALPN protocol"));
+                }
+
+                selected_alpn_protocol_ = selected.value();
+                AlpnExtension alpn;
+                alpn.protocols = {selected.value()};
+                ee.extensions.push_back(alpn.serialize());
+            }
+
             auto ee_bytes = ee.serialize();
             update_transcript(ee_bytes);
 
@@ -720,6 +791,7 @@ namespace netpipe::tls {
 
         // Flags
         bool server_finished_received_ = false;
+        dp::Optional<dp::String> selected_alpn_protocol_;
 
         // Generate X25519 keypair
         void generate_x25519_keypair() {

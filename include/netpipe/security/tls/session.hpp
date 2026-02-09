@@ -22,6 +22,9 @@ namespace netpipe::tls {
 
         // Skip certificate verification (for testing only!)
         bool skip_cert_verification = false;
+
+        // ALPN protocols in preference order
+        dp::Vector<dp::String> alpn_protocols;
     };
 
     // TLS Session
@@ -42,6 +45,7 @@ namespace netpipe::tls {
             hs_config.private_key = config_.private_key;
             hs_config.server_name = config_.server_name;
             hs_config.skip_cert_verification = config_.skip_cert_verification;
+            hs_config.alpn_protocols = config_.alpn_protocols;
 
             handshake_ = std::make_unique<Handshake>(Role::Client, hs_config);
 
@@ -135,6 +139,7 @@ namespace netpipe::tls {
             hs_config.certificate = config_.certificate;
             hs_config.private_key = config_.private_key;
             hs_config.skip_cert_verification = config_.skip_cert_verification;
+            hs_config.alpn_protocols = config_.alpn_protocols;
 
             handshake_ = std::make_unique<Handshake>(Role::Server, hs_config);
 
@@ -199,6 +204,14 @@ namespace netpipe::tls {
 
         // Check if session is established
         bool is_established() const { return established_; }
+
+        // Selected ALPN protocol after handshake
+        dp::Optional<dp::String> selected_alpn_protocol() const {
+            if (!handshake_) {
+                return dp::nullopt;
+            }
+            return handshake_->selected_alpn_protocol();
+        }
 
         // Check if key update is recommended (sequence numbers getting high)
         bool needs_key_update() const {
