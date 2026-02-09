@@ -1,6 +1,17 @@
 #pragma once
 
 /// HTTP/1.1 protocol module (scaffold)
+///
+/// Current scope:
+/// - Request/status line parsing and serialization
+/// - Header parsing with strict and lenient modes
+/// - Content-Length and chunked body support
+/// - Connection keep-alive behavior modeling
+///
+/// Currently unsupported:
+/// - Trailer section parsing and emission for chunked transfer
+/// - Upgrade handshake state machine
+/// - Pipelining queue management
 
 #include <netpipe/protocol/http/common.hpp>
 #include <netpipe/protocol/http/transport_adapter.hpp>

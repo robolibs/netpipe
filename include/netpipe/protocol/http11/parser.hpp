@@ -6,6 +6,15 @@
 
 namespace netpipe::http11 {
 
+    struct ParseOptions {
+        bool strict = true;
+        bool allow_obs_fold = false;
+        bool accept_lf_line_endings = false;
+    };
+
+    dp::Result<Request> parse_request_head_with_options(const dp::String &head, const ParseOptions &options);
+    dp::Result<Response> parse_response_head_with_options(const dp::String &head, const ParseOptions &options);
+
     inline dp::String header_name_to_lower(const dp::String &name) {
         dp::String out;
         out.reserve(name.size());
@@ -165,21 +174,49 @@ namespace netpipe::http11 {
     }
 
     inline dp::Result<Request> parse_request_head(const dp::String &head) {
-        auto line_end = head.find("\r\n");
+        return parse_request_head_with_options(head, ParseOptions{});
+    }
+
+    inline dp::Result<dp::String> canonicalize_head_line_endings(const dp::String &head, const ParseOptions &options) {
+        if (!options.accept_lf_line_endings) {
+            return dp::result::ok(head);
+        }
+
+        dp::String normalized;
+        normalized.reserve(head.size() + 8);
+        for (dp::usize i = 0; i < head.size(); ++i) {
+            if (head[i] == '\n' && (i == 0 || head[i - 1] != '\r')) {
+                normalized += "\r\n";
+            } else {
+                normalized.push_back(head[i]);
+            }
+        }
+        return dp::result::ok(std::move(normalized));
+    }
+
+    inline dp::Result<Request> parse_request_head_with_options(const dp::String &head, const ParseOptions &options) {
+        auto canonical = canonicalize_head_line_endings(head, options);
+        if (canonical.is_err()) {
+            return dp::result::err(canonical.error());
+        }
+
+        const auto &input = canonical.value();
+
+        auto line_end = input.find("\r\n");
         if (line_end == dp::String::npos) {
             return dp::result::err(http::error::protocol_error("request head missing CRLF"));
         }
 
         Request request;
-        auto request_line = head.substr(0, line_end);
+        auto request_line = input.substr(0, line_end);
         auto line_result = parse_request_line(request_line, request);
         if (line_result.is_err()) {
             return dp::result::err(line_result.error());
         }
 
         dp::usize pos = line_end + 2;
-        while (pos < head.size()) {
-            auto next = head.find("\r\n", pos);
+        while (pos < input.size()) {
+            auto next = input.find("\r\n", pos);
             if (next == dp::String::npos) {
                 return dp::result::err(http::error::protocol_error("header block missing CRLF terminator"));
             }
@@ -188,9 +225,15 @@ namespace netpipe::http11 {
                 return dp::result::ok(std::move(request));
             }
 
-            auto header_line = head.substr(pos, next - pos);
+            auto header_line = input.substr(pos, next - pos);
             if (header_line[0] == ' ' || header_line[0] == '\t') {
-                return dp::result::err(http::error::protocol_error("obs-fold headers are not supported"));
+                if (!options.allow_obs_fold || request.headers.empty()) {
+                    return dp::result::err(http::error::protocol_error("obs-fold headers are not supported"));
+                }
+                request.headers.back().value += " ";
+                request.headers.back().value += trim_ows(header_line);
+                pos = next + 2;
+                continue;
             }
 
             auto header = parse_header_line(header_line);
@@ -206,21 +249,32 @@ namespace netpipe::http11 {
     }
 
     inline dp::Result<Response> parse_response_head(const dp::String &head) {
-        auto line_end = head.find("\r\n");
+        return parse_response_head_with_options(head, ParseOptions{});
+    }
+
+    inline dp::Result<Response> parse_response_head_with_options(const dp::String &head, const ParseOptions &options) {
+        auto canonical = canonicalize_head_line_endings(head, options);
+        if (canonical.is_err()) {
+            return dp::result::err(canonical.error());
+        }
+
+        const auto &input = canonical.value();
+
+        auto line_end = input.find("\r\n");
         if (line_end == dp::String::npos) {
             return dp::result::err(http::error::protocol_error("response head missing CRLF"));
         }
 
         Response response;
-        auto status_line = head.substr(0, line_end);
+        auto status_line = input.substr(0, line_end);
         auto line_result = parse_status_line(status_line, response);
         if (line_result.is_err()) {
             return dp::result::err(line_result.error());
         }
 
         dp::usize pos = line_end + 2;
-        while (pos < head.size()) {
-            auto next = head.find("\r\n", pos);
+        while (pos < input.size()) {
+            auto next = input.find("\r\n", pos);
             if (next == dp::String::npos) {
                 return dp::result::err(http::error::protocol_error("header block missing CRLF terminator"));
             }
@@ -229,9 +283,15 @@ namespace netpipe::http11 {
                 return dp::result::ok(std::move(response));
             }
 
-            auto header_line = head.substr(pos, next - pos);
+            auto header_line = input.substr(pos, next - pos);
             if (header_line[0] == ' ' || header_line[0] == '\t') {
-                return dp::result::err(http::error::protocol_error("obs-fold headers are not supported"));
+                if (!options.allow_obs_fold || response.headers.empty()) {
+                    return dp::result::err(http::error::protocol_error("obs-fold headers are not supported"));
+                }
+                response.headers.back().value += " ";
+                response.headers.back().value += trim_ows(header_line);
+                pos = next + 2;
+                continue;
             }
 
             auto header = parse_header_line(header_line);
