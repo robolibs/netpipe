@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.0.19] - 2026-02-10
+
+### <!-- 0 -->⛰️  Features
+
+- Add pipelining queue model and upgrade path
+- Add incremental parsing and chunked trailer support
+- Enforce stricter frame semantic validation
+- Add HPACK Huffman string decode support
+- Extend selector with http2 connection factory
+- Implement connection startup and graceful shutdown orchestration
+- Add request response framing helpers to connection
+- Integrate settings stream flow and shutdown engines
+- Add connection session scaffold
+
+### <!-- 2 -->🚜 Refactor
+
+- Rename http11 module and APIs to http1
+
+### Examples
+
+- Migrate http2 example to connection session api
+
 ## [0.0.17] - 2026-02-09
 
 ### <!-- 0 -->⛰️  Features
