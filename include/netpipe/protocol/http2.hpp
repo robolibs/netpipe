@@ -4,6 +4,7 @@
 
 #include <netpipe/protocol/http/common.hpp>
 #include <netpipe/protocol/http/transport_adapter.hpp>
+#include <netpipe/protocol/http2/connection.hpp>
 #include <netpipe/protocol/http2/flow_control.hpp>
 #include <netpipe/protocol/http2/frame.hpp>
 #include <netpipe/protocol/http2/hpack.hpp>
