@@ -30,6 +30,7 @@ namespace netpipe::http2 {
 
         bool is_client() const { return is_client_; }
         ConnectionState state() const { return settings_.state(); }
+        bool startup_complete() const { return settings_.state() == ConnectionState::SettingsExchanged; }
 
         dp::Result<void> start(const Settings &local_settings = {}) {
             if (!is_client_) {
@@ -72,6 +73,12 @@ namespace netpipe::http2 {
         }
 
         dp::Result<void> process_inbound_frame(const Frame &frame) {
+            if (!startup_complete() && frame.header.type != FrameType::Settings &&
+                frame.header.type != FrameType::GoAway && frame.header.type != FrameType::RstStream) {
+                return dp::result::err(dp::Error::invalid_argument(
+                    "HTTP/2 startup not complete; only SETTINGS/GOAWAY/RST_STREAM allowed"));
+            }
+
             switch (frame.header.type) {
             case FrameType::Settings: {
                 auto ack = settings_.process_incoming_frame(frame);
@@ -218,6 +225,10 @@ namespace netpipe::http2 {
         }
 
         dp::Result<dp::u32> open_request_stream() {
+            if (!startup_complete()) {
+                return dp::result::err(
+                    dp::Error::invalid_argument("cannot open request stream before SETTINGS exchange"));
+            }
             if (draining()) {
                 return dp::result::err(dp::Error::invalid_argument("connection is draining; cannot open new stream"));
             }
@@ -231,6 +242,10 @@ namespace netpipe::http2 {
         }
 
         dp::Result<void> send_request_headers(dp::u32 stream_id, const Request &request, bool end_stream) {
+            if (!startup_complete()) {
+                return dp::result::err(
+                    dp::Error::invalid_argument("cannot send request headers before SETTINGS exchange"));
+            }
             auto valid = validate_request(request);
             if (valid.is_err()) {
                 return dp::result::err(valid.error());
@@ -247,6 +262,10 @@ namespace netpipe::http2 {
         }
 
         dp::Result<void> send_response_headers(dp::u32 stream_id, const Response &response, bool end_stream) {
+            if (!startup_complete()) {
+                return dp::result::err(
+                    dp::Error::invalid_argument("cannot send response headers before SETTINGS exchange"));
+            }
             auto valid = validate_response(response);
             if (valid.is_err()) {
                 return dp::result::err(valid.error());
@@ -260,6 +279,9 @@ namespace netpipe::http2 {
         }
 
         dp::Result<void> send_data(dp::u32 stream_id, const dp::Vector<dp::u8> &payload, bool end_stream) {
+            if (!startup_complete()) {
+                return dp::result::err(dp::Error::invalid_argument("cannot send DATA before SETTINGS exchange"));
+            }
             flow_controller_.ensure_stream(stream_id);
 
             auto consume = flow_controller_.consume_outbound(stream_id, static_cast<dp::i32>(payload.size()));
@@ -280,6 +302,29 @@ namespace netpipe::http2 {
 
             if (end_stream) {
                 shutdown_manager_.on_stream_closed(stream_id);
+            }
+            return dp::result::ok();
+        }
+
+        dp::Result<void> send_rst_stream(dp::u32 stream_id, ErrorCode error_code) {
+            auto frame = make_rst_stream(stream_id, error_code);
+            auto queued = enqueue_frame(frame);
+            if (queued.is_err()) {
+                return dp::result::err(queued.error());
+            }
+            shutdown_manager_.on_stream_closed(stream_id);
+            return dp::result::ok();
+        }
+
+        dp::Result<void> initiate_shutdown(ErrorCode code, const dp::Vector<dp::u8> &debug_data = {}) {
+            auto goaway = shutdown_manager_.start_shutdown(code, debug_data);
+            if (goaway.is_err()) {
+                return dp::result::err(goaway.error());
+            }
+
+            auto queued = enqueue_frame(goaway.value());
+            if (queued.is_err()) {
+                return dp::result::err(queued.error());
             }
             return dp::result::ok();
         }

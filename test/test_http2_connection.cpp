@@ -16,6 +16,42 @@ namespace {
         return frame;
     }
 
+    void complete_settings_startup(netpipe::http2::Connection &client, netpipe::http2::Connection &server) {
+        REQUIRE(client.start().is_ok());
+
+        auto client_start = client.pop_outbound();
+        REQUIRE(client_start.is_ok());
+        REQUIRE(server.process_inbound_bytes(client_start.value()).is_ok());
+
+        REQUIRE(server.send_server_settings().is_ok());
+
+        // server has ACK(to client settings) + server SETTINGS
+        auto server_msg1 = server.pop_outbound();
+        REQUIRE(server_msg1.is_ok());
+        REQUIRE(client.process_inbound_bytes(server_msg1.value()).is_ok());
+
+        auto server_msg2 = server.pop_outbound();
+        REQUIRE(server_msg2.is_ok());
+        REQUIRE(client.process_inbound_bytes(server_msg2.value()).is_ok());
+
+        // client ACK(to server settings)
+        auto client_ack = client.pop_outbound();
+        REQUIRE(client_ack.is_ok());
+        REQUIRE(server.process_inbound_bytes(client_ack.value()).is_ok());
+
+        CHECK(client.startup_complete());
+        CHECK(server.startup_complete());
+
+        while (client.has_event()) {
+            auto ev = client.pop_event();
+            REQUIRE(ev.is_ok());
+        }
+        while (server.has_event()) {
+            auto ev = server.pop_event();
+            REQUIRE(ev.is_ok());
+        }
+    }
+
 } // namespace
 
 TEST_CASE("HTTP/2 connection client startup queues preface and settings") {
@@ -82,21 +118,9 @@ TEST_CASE("HTTP/2 connection server can process inbound startup bytes") {
 }
 
 TEST_CASE("HTTP/2 connection emits structured inbound events") {
+    netpipe::http2::Connection client(true);
     netpipe::http2::Connection conn(false);
-
-    netpipe::Message preface(netpipe::http2::PREFACE, netpipe::http2::PREFACE + std::strlen(netpipe::http2::PREFACE));
-    REQUIRE(conn.accept_client_preface(preface).is_ok());
-
-    netpipe::http2::Settings settings;
-    settings.set(netpipe::http2::SettingsId::HeaderTableSize, 4096);
-    auto settings_frame = netpipe::http2::make_settings_frame(settings);
-    REQUIRE(conn.process_inbound_frame(settings_frame).is_ok());
-    REQUIRE(conn.has_event());
-
-    auto settings_event = conn.pop_event();
-    REQUIRE(settings_event.is_ok());
-    CHECK(settings_event.value().type == netpipe::http2::InboundEventType::Settings);
-    CHECK(settings_event.value().settings.has_value());
+    complete_settings_startup(client, conn);
 
     netpipe::http2::HpackContext encoder;
     netpipe::http::HeaderList headers = {
@@ -150,6 +174,8 @@ TEST_CASE("HTTP/2 connection emits structured inbound events") {
 TEST_CASE("HTTP/2 connection request response helper roundtrip") {
     netpipe::http2::Connection client(true);
     netpipe::http2::Connection server(false);
+
+    complete_settings_startup(client, server);
 
     auto stream_id_result = client.open_request_stream();
     REQUIRE(stream_id_result.is_ok());
@@ -221,4 +247,37 @@ TEST_CASE("HTTP/2 connection request response helper roundtrip") {
     REQUIRE(cev2.is_ok());
     CHECK(cev2.value().type == netpipe::http2::InboundEventType::Data);
     CHECK(cev2.value().data.size() == 2);
+}
+
+TEST_CASE("HTTP/2 connection startup gating and shutdown orchestration") {
+    netpipe::http2::Connection client(true);
+    netpipe::http2::Connection server(false);
+
+    CHECK(client.open_request_stream().is_err());
+
+    complete_settings_startup(client, server);
+
+    auto sid = client.open_request_stream();
+    REQUIRE(sid.is_ok());
+
+    REQUIRE(client.send_rst_stream(sid.value(), netpipe::http2::ErrorCode::Cancel).is_ok());
+    auto rst_wire = client.pop_outbound();
+    REQUIRE(rst_wire.is_ok());
+    REQUIRE(server.process_inbound_bytes(rst_wire.value()).is_ok());
+    REQUIRE(server.has_event());
+    auto rst_event = server.pop_event();
+    REQUIRE(rst_event.is_ok());
+    CHECK(rst_event.value().type == netpipe::http2::InboundEventType::RstStream);
+
+    REQUIRE(server.initiate_shutdown(netpipe::http2::ErrorCode::NoError).is_ok());
+    auto goaway_wire = server.pop_outbound();
+    REQUIRE(goaway_wire.is_ok());
+    REQUIRE(client.process_inbound_bytes(goaway_wire.value()).is_ok());
+    REQUIRE(client.has_event());
+    auto goaway_event = client.pop_event();
+    REQUIRE(goaway_event.is_ok());
+    CHECK(goaway_event.value().type == netpipe::http2::InboundEventType::GoAway);
+    CHECK(client.draining());
+
+    CHECK(client.open_request_stream().is_err());
 }
