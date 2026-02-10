@@ -60,3 +60,24 @@ TEST_CASE("HTTP/1.1 connection keep-alive reacts to Connection close") {
     CHECK(decoded_response.is_ok());
     CHECK(client.keep_alive() == false);
 }
+
+TEST_CASE("HTTP/1.1 connection carries chunked trailers") {
+    netpipe::http11::ClientConnection client;
+    netpipe::http11::ServerConnection server;
+
+    netpipe::http11::Request request;
+    request.method = netpipe::http::Method::Post;
+    request.target = "/upload";
+    netpipe::http11::set_header(request.headers, "Host", "localhost");
+    netpipe::http11::set_header(request.headers, "Transfer-Encoding", "chunked");
+    request.body = dp::Vector<dp::u8>{'a', 'b', 'c'};
+    request.trailers = {{"X-Checksum", "abc"}};
+
+    auto wire = client.encode_request(request);
+    REQUIRE(wire.is_ok());
+    auto decoded = server.decode_request(wire.value());
+    REQUIRE(decoded.is_ok());
+    REQUIRE(decoded.value().trailers.size() == 1);
+    CHECK(decoded.value().trailers[0].name == "X-Checksum");
+    CHECK(decoded.value().trailers[0].value == "abc");
+}

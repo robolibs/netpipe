@@ -36,7 +36,7 @@ namespace netpipe::http11 {
 
             if (!copy.body.empty()) {
                 if (body_kind_from_headers(copy.headers) == BodyKind::Chunked) {
-                    auto encoded = encode_chunked_body(copy.body);
+                    auto encoded = encode_chunked_body(copy.body, copy.trailers);
                     if (encoded.is_err()) {
                         return dp::result::err(encoded.error());
                     }
@@ -75,11 +75,12 @@ namespace netpipe::http11 {
                     }
                     response.body = std::move(decoded.value());
                 } else if (kind == BodyKind::Chunked) {
-                    auto decoded = decode_chunked_body(body);
+                    auto decoded = decode_chunked_body_ex(body);
                     if (decoded.is_err()) {
                         return dp::result::err(decoded.error());
                     }
-                    response.body = std::move(decoded.value());
+                    response.body = std::move(decoded.value().body);
+                    response.trailers = std::move(decoded.value().trailers);
                 } else {
                     response.body = std::move(body);
                 }
@@ -121,11 +122,12 @@ namespace netpipe::http11 {
                 }
                 request.body = std::move(decoded.value());
             } else if (kind == BodyKind::Chunked) {
-                auto decoded = decode_chunked_body(body);
+                auto decoded = decode_chunked_body_ex(body);
                 if (decoded.is_err()) {
                     return dp::result::err(decoded.error());
                 }
-                request.body = std::move(decoded.value());
+                request.body = std::move(decoded.value().body);
+                request.trailers = std::move(decoded.value().trailers);
             } else {
                 request.body = std::move(body);
             }
@@ -154,7 +156,7 @@ namespace netpipe::http11 {
             auto message = to_message(head.value());
             if (!copy.body.empty()) {
                 if (body_kind_from_headers(copy.headers) == BodyKind::Chunked) {
-                    auto encoded = encode_chunked_body(copy.body);
+                    auto encoded = encode_chunked_body(copy.body, copy.trailers);
                     if (encoded.is_err()) {
                         return dp::result::err(encoded.error());
                     }

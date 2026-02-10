@@ -11,6 +11,7 @@ namespace netpipe::http11 {
         dp::String target = "/";
         http::HeaderList headers;
         dp::Vector<dp::u8> body;
+        http::HeaderList trailers;
     };
 
     struct Response {
@@ -18,6 +19,7 @@ namespace netpipe::http11 {
         dp::String reason = "OK";
         http::HeaderList headers;
         dp::Vector<dp::u8> body;
+        http::HeaderList trailers;
     };
 
     inline dp::Result<void> validate_request(const Request &request) {

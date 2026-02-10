@@ -14,13 +14,17 @@ TEST_CASE("HTTP/1.1 content-length body decoding") {
 
 TEST_CASE("HTTP/1.1 chunked body encode/decode roundtrip") {
     dp::Vector<dp::u8> body{'n', 'e', 't', 'p', 'i', 'p', 'e'};
+    netpipe::http::HeaderList trailers = {{"x-checksum", "7"}};
 
-    auto encoded = netpipe::http11::encode_chunked_body(body);
+    auto encoded = netpipe::http11::encode_chunked_body(body, trailers);
     CHECK(encoded.is_ok());
 
-    auto decoded = netpipe::http11::decode_chunked_body(encoded.value());
+    auto decoded = netpipe::http11::decode_chunked_body_ex(encoded.value());
     CHECK(decoded.is_ok());
-    CHECK(decoded.value() == body);
+    CHECK(decoded.value().body == body);
+    REQUIRE(decoded.value().trailers.size() == 1);
+    CHECK(decoded.value().trailers[0].name == "x-checksum");
+    CHECK(decoded.value().trailers[0].value == "7");
 }
 
 TEST_CASE("HTTP/1.1 empty-body response rules") {

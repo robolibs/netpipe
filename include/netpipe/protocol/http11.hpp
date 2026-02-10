@@ -17,6 +17,7 @@
 #include <netpipe/protocol/http/transport_adapter.hpp>
 #include <netpipe/protocol/http11/body.hpp>
 #include <netpipe/protocol/http11/connection.hpp>
+#include <netpipe/protocol/http11/incremental.hpp>
 #include <netpipe/protocol/http11/parser.hpp>
 #include <netpipe/protocol/http11/serialize.hpp>
 #include <netpipe/protocol/http11/types.hpp>

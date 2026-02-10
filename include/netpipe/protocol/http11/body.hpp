@@ -1,10 +1,32 @@
 #pragma once
 
+#include <algorithm>
+
 #include <netpipe/protocol/http11/serialize.hpp>
 
 namespace netpipe::http11 {
 
     enum class BodyKind { None, ContentLength, Chunked };
+
+    struct ChunkedBody {
+        dp::Vector<dp::u8> body;
+        http::HeaderList trailers;
+    };
+
+    inline dp::String to_hex(dp::usize value) {
+        if (value == 0) {
+            return "0";
+        }
+
+        dp::String out;
+        while (value > 0) {
+            dp::u8 nibble = static_cast<dp::u8>(value & 0xF);
+            out.push_back(static_cast<char>(nibble < 10 ? ('0' + nibble) : ('a' + (nibble - 10))));
+            value >>= 4;
+        }
+        std::reverse(out.begin(), out.end());
+        return out;
+    }
 
     inline BodyKind body_kind_from_headers(const http::HeaderList &headers) {
         auto te = find_header_value(headers, "transfer-encoding");
@@ -89,17 +111,27 @@ namespace netpipe::http11 {
         return dp::result::ok(dp::Vector<dp::u8>(payload.begin(), payload.begin() + expected));
     }
 
-    inline dp::Result<dp::Vector<dp::u8>> encode_chunked_body(const dp::Vector<dp::u8> &body) {
+    inline dp::Result<dp::Vector<dp::u8>> encode_chunked_body(const dp::Vector<dp::u8> &body,
+                                                              const http::HeaderList &trailers = {}) {
         dp::String out;
-        out += std::to_string(body.size()).c_str();
+        out += to_hex(body.size());
         out += "\r\n";
         out.append(reinterpret_cast<const char *>(body.data()), body.size());
-        out += "\r\n0\r\n\r\n";
+        out += "\r\n0\r\n";
+
+        for (const auto &trailer : trailers) {
+            out += trailer.name;
+            out += ": ";
+            out += trailer.value;
+            out += "\r\n";
+        }
+
+        out += "\r\n";
         return dp::result::ok(dp::Vector<dp::u8>(out.begin(), out.end()));
     }
 
-    inline dp::Result<dp::Vector<dp::u8>> decode_chunked_body(const dp::Vector<dp::u8> &payload) {
-        dp::Vector<dp::u8> out;
+    inline dp::Result<ChunkedBody> decode_chunked_body_ex(const dp::Vector<dp::u8> &payload) {
+        ChunkedBody out;
         dp::usize pos = 0;
 
         while (pos < payload.size()) {
@@ -108,12 +140,17 @@ namespace netpipe::http11 {
                 ++line_end;
             }
             if (line_end + 1 >= payload.size()) {
-                return dp::result::err(http::error::protocol_error("invalid chunk size line"));
+                return dp::result::err(http::error::protocol_error("incomplete chunk size line"));
             }
 
             dp::String size_text(reinterpret_cast<const char *>(payload.data() + pos), line_end - pos);
             if (size_text.empty()) {
                 return dp::result::err(http::error::protocol_error("empty chunk size"));
+            }
+
+            auto semi = size_text.find(';');
+            if (semi != dp::String::npos) {
+                size_text = size_text.substr(0, semi);
             }
 
             dp::usize chunk_size = 0;
@@ -134,17 +171,39 @@ namespace netpipe::http11 {
             pos = line_end + 2;
 
             if (chunk_size == 0) {
-                if (pos + 2 > payload.size() || payload[pos] != '\r' || payload[pos + 1] != '\n') {
-                    return dp::result::err(http::error::protocol_error("invalid final chunk terminator"));
+                while (true) {
+                    if (pos + 2 > payload.size()) {
+                        return dp::result::err(http::error::protocol_error("incomplete chunk trailer section"));
+                    }
+
+                    if (payload[pos] == '\r' && payload[pos + 1] == '\n') {
+                        return dp::result::ok(std::move(out));
+                    }
+
+                    dp::usize trailer_end = pos;
+                    while (trailer_end + 1 < payload.size() &&
+                           !(payload[trailer_end] == '\r' && payload[trailer_end + 1] == '\n')) {
+                        ++trailer_end;
+                    }
+                    if (trailer_end + 1 >= payload.size()) {
+                        return dp::result::err(http::error::protocol_error("incomplete chunk trailer line"));
+                    }
+
+                    dp::String trailer_line(reinterpret_cast<const char *>(payload.data() + pos), trailer_end - pos);
+                    auto trailer = parse_header_line(trailer_line);
+                    if (trailer.is_err()) {
+                        return dp::result::err(trailer.error());
+                    }
+                    out.trailers.push_back(std::move(trailer.value()));
+                    pos = trailer_end + 2;
                 }
-                return dp::result::ok(std::move(out));
             }
 
             if (pos + chunk_size + 2 > payload.size()) {
                 return dp::result::err(http::error::protocol_error("incomplete chunk data"));
             }
 
-            out.insert(out.end(), payload.begin() + pos, payload.begin() + pos + chunk_size);
+            out.body.insert(out.body.end(), payload.begin() + pos, payload.begin() + pos + chunk_size);
             pos += chunk_size;
             if (payload[pos] != '\r' || payload[pos + 1] != '\n') {
                 return dp::result::err(http::error::protocol_error("missing chunk CRLF terminator"));
@@ -153,6 +212,14 @@ namespace netpipe::http11 {
         }
 
         return dp::result::err(http::error::protocol_error("unterminated chunked body"));
+    }
+
+    inline dp::Result<dp::Vector<dp::u8>> decode_chunked_body(const dp::Vector<dp::u8> &payload) {
+        auto parsed = decode_chunked_body_ex(payload);
+        if (parsed.is_err()) {
+            return dp::result::err(parsed.error());
+        }
+        return dp::result::ok(std::move(parsed.value().body));
     }
 
 } // namespace netpipe::http11
