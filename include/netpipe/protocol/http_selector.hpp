@@ -136,6 +136,17 @@ namespace netpipe::http {
             return dp::result::ok(http2::StreamManager{});
         }
 
+        dp::Result<http2::Connection> create_http2_connection(bool is_client = true) const {
+            auto selected = select();
+            if (selected.is_err()) {
+                return dp::result::err(selected.error());
+            }
+            if (selected.value() != Version::Http2) {
+                return dp::result::err(dp::Error::invalid_argument("selector did not choose HTTP/2"));
+            }
+            return dp::result::ok(http2::Connection{is_client});
+        }
+
       private:
         SelectorConfig config_;
         NegotiatedCapabilities caps_;
