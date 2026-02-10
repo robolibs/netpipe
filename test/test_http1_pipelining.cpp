@@ -1,20 +1,20 @@
 #include <doctest/doctest.h>
 
-#include <netpipe/protocol/http11/pipelining.hpp>
+#include <netpipe/protocol/http1/pipelining.hpp>
 
 TEST_CASE("HTTP/1.1 server pipelining preserves request order") {
-    netpipe::http11::ClientConnection raw_client;
-    netpipe::http11::PipelinedServerConnection server;
+    netpipe::http1::ClientConnection raw_client;
+    netpipe::http1::PipelinedServerConnection server;
 
-    netpipe::http11::Request r1;
+    netpipe::http1::Request r1;
     r1.method = netpipe::http::Method::Get;
     r1.target = "/a";
-    netpipe::http11::set_header(r1.headers, "Host", "localhost");
+    netpipe::http1::set_header(r1.headers, "Host", "localhost");
 
-    netpipe::http11::Request r2;
+    netpipe::http1::Request r2;
     r2.method = netpipe::http::Method::Get;
     r2.target = "/b";
-    netpipe::http11::set_header(r2.headers, "Host", "localhost");
+    netpipe::http1::set_header(r2.headers, "Host", "localhost");
 
     auto w1 = raw_client.encode_request(r1);
     auto w2 = raw_client.encode_request(r2);
@@ -37,19 +37,19 @@ TEST_CASE("HTTP/1.1 server pipelining preserves request order") {
 }
 
 TEST_CASE("HTTP/1.1 pipelined responses map to request methods") {
-    netpipe::http11::ClientConnection raw_client;
-    netpipe::http11::PipelinedServerConnection server;
-    netpipe::http11::PipelinedClientConnection client;
+    netpipe::http1::ClientConnection raw_client;
+    netpipe::http1::PipelinedServerConnection server;
+    netpipe::http1::PipelinedClientConnection client;
 
-    netpipe::http11::Request head_req;
+    netpipe::http1::Request head_req;
     head_req.method = netpipe::http::Method::Head;
     head_req.target = "/meta";
-    netpipe::http11::set_header(head_req.headers, "Host", "localhost");
+    netpipe::http1::set_header(head_req.headers, "Host", "localhost");
 
-    netpipe::http11::Request get_req;
+    netpipe::http1::Request get_req;
     get_req.method = netpipe::http::Method::Get;
     get_req.target = "/data";
-    netpipe::http11::set_header(get_req.headers, "Host", "localhost");
+    netpipe::http1::set_header(get_req.headers, "Host", "localhost");
 
     auto wr1 = raw_client.encode_request(head_req);
     auto wr2 = raw_client.encode_request(get_req);
@@ -62,11 +62,11 @@ TEST_CASE("HTTP/1.1 pipelined responses map to request methods") {
     REQUIRE(server.pop_request().is_ok());
     REQUIRE(server.pop_request().is_ok());
 
-    netpipe::http11::Response head_resp;
+    netpipe::http1::Response head_resp;
     head_resp.status_code = 200;
     head_resp.body = dp::Vector<dp::u8>{'x'};
 
-    netpipe::http11::Response get_resp;
+    netpipe::http1::Response get_resp;
     get_resp.status_code = 200;
     get_resp.body = dp::Vector<dp::u8>{'o', 'k'};
 
@@ -89,26 +89,26 @@ TEST_CASE("HTTP/1.1 pipelined responses map to request methods") {
 }
 
 TEST_CASE("HTTP/1.1 upgrade path marks pipelined connection upgraded") {
-    netpipe::http11::ClientConnection raw_client;
-    netpipe::http11::PipelinedServerConnection server;
-    netpipe::http11::PipelinedClientConnection client;
+    netpipe::http1::ClientConnection raw_client;
+    netpipe::http1::PipelinedServerConnection server;
+    netpipe::http1::PipelinedClientConnection client;
 
-    netpipe::http11::Request up_req;
+    netpipe::http1::Request up_req;
     up_req.method = netpipe::http::Method::Get;
     up_req.target = "/chat";
-    netpipe::http11::set_header(up_req.headers, "Host", "localhost");
-    netpipe::http11::set_header(up_req.headers, "Connection", "Upgrade");
-    netpipe::http11::set_header(up_req.headers, "Upgrade", "websocket");
+    netpipe::http1::set_header(up_req.headers, "Host", "localhost");
+    netpipe::http1::set_header(up_req.headers, "Connection", "Upgrade");
+    netpipe::http1::set_header(up_req.headers, "Upgrade", "websocket");
 
     auto wire_req = raw_client.encode_request(up_req);
     REQUIRE(wire_req.is_ok());
     REQUIRE(server.feed_data(wire_req.value()).is_ok());
     auto parsed_req = server.pop_request();
     REQUIRE(parsed_req.is_ok());
-    CHECK(netpipe::http11::is_upgrade_request(parsed_req.value()));
-    REQUIRE(netpipe::http11::requested_upgrade_protocol(parsed_req.value()).has_value());
+    CHECK(netpipe::http1::is_upgrade_request(parsed_req.value()));
+    REQUIRE(netpipe::http1::requested_upgrade_protocol(parsed_req.value()).has_value());
 
-    auto switch_resp = netpipe::http11::make_switching_protocols_response("websocket");
+    auto switch_resp = netpipe::http1::make_switching_protocols_response("websocket");
     auto wire_resp = server.encode_next_response(switch_resp);
     REQUIRE(wire_resp.is_ok());
     CHECK(server.upgraded());
@@ -119,8 +119,8 @@ TEST_CASE("HTTP/1.1 upgrade path marks pipelined connection upgraded") {
     REQUIRE(client.feed_data(wire_resp.value()).is_ok());
     auto parsed_resp = client.pop_response();
     REQUIRE(parsed_resp.is_ok());
-    CHECK(netpipe::http11::is_switching_protocols_response(parsed_resp.value()));
-    REQUIRE(netpipe::http11::negotiated_upgrade_protocol(parsed_resp.value()).has_value());
+    CHECK(netpipe::http1::is_switching_protocols_response(parsed_resp.value()));
+    REQUIRE(netpipe::http1::negotiated_upgrade_protocol(parsed_resp.value()).has_value());
     CHECK(client.upgraded());
     CHECK(client.encode_request(up_req).is_err());
 }

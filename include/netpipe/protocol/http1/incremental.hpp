@@ -1,9 +1,9 @@
 #pragma once
 
 #include <netpipe/core/common.hpp>
-#include <netpipe/protocol/http11/body.hpp>
+#include <netpipe/protocol/http1/body.hpp>
 
-namespace netpipe::http11 {
+namespace netpipe::http1 {
 
     inline dp::Optional<dp::usize> find_header_terminator(const netpipe::Message &buffer, const ParseOptions &options) {
         for (dp::usize i = 0; i + 3 < buffer.size(); ++i) {
@@ -240,4 +240,4 @@ namespace netpipe::http11 {
         netpipe::Message buffer_;
     };
 
-} // namespace netpipe::http11
+} // namespace netpipe::http1

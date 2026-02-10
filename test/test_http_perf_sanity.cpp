@@ -2,25 +2,25 @@
 
 #include <doctest/doctest.h>
 
-#include <netpipe/protocol/http11.hpp>
+#include <netpipe/protocol/http1.hpp>
 #include <netpipe/protocol/http2.hpp>
 
-TEST_CASE("HTTP performance sanity: http11 serialize/parse loop") {
-    netpipe::http11::Request req;
+TEST_CASE("HTTP performance sanity: http1 serialize/parse loop") {
+    netpipe::http1::Request req;
     req.method = netpipe::http::Method::Post;
     req.target = "/perf";
-    netpipe::http11::set_header(req.headers, "Host", "bench.local");
-    netpipe::http11::set_header(req.headers, "Content-Type", "application/json");
+    netpipe::http1::set_header(req.headers, "Host", "bench.local");
+    netpipe::http1::set_header(req.headers, "Content-Type", "application/json");
     req.body = dp::Vector<dp::u8>{'{', '}', '\n'};
 
     auto start = std::chrono::steady_clock::now();
     dp::usize bytes_processed = 0;
     for (int i = 0; i < 2000; ++i) {
-        auto wire = netpipe::http11::ClientConnection{}.encode_request(req);
+        auto wire = netpipe::http1::ClientConnection{}.encode_request(req);
         REQUIRE(wire.is_ok());
         bytes_processed += wire.value().size();
 
-        auto parsed = netpipe::http11::ServerConnection{}.decode_request(wire.value());
+        auto parsed = netpipe::http1::ServerConnection{}.decode_request(wire.value());
         REQUIRE(parsed.is_ok());
     }
     auto end = std::chrono::steady_clock::now();

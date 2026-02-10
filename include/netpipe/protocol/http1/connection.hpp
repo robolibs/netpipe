@@ -1,9 +1,9 @@
 #pragma once
 
 #include <netpipe/core/common.hpp>
-#include <netpipe/protocol/http11/body.hpp>
+#include <netpipe/protocol/http1/body.hpp>
 
-namespace netpipe::http11 {
+namespace netpipe::http1 {
 
     inline dp::Optional<dp::usize> find_head_end(const netpipe::Message &payload) {
         for (dp::usize i = 0; i + 3 < payload.size(); ++i) {
@@ -178,4 +178,4 @@ namespace netpipe::http11 {
         bool keep_alive_ = true;
     };
 
-} // namespace netpipe::http11
+} // namespace netpipe::http1

@@ -2,9 +2,9 @@
 
 #include <cctype>
 
-#include <netpipe/protocol/http11/types.hpp>
+#include <netpipe/protocol/http1/types.hpp>
 
-namespace netpipe::http11 {
+namespace netpipe::http1 {
 
     // RFC coverage notes (smoke-level, not full conformance):
     // - Request/status line tokenization and HTTP/1.1 version checks
@@ -312,4 +312,4 @@ namespace netpipe::http11 {
         return dp::result::err(http::error::protocol_error("header block not terminated"));
     }
 
-} // namespace netpipe::http11
+} // namespace netpipe::http1

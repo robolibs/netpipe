@@ -5,7 +5,7 @@
 ### <!-- 0 -->⛰️  Features
 
 - Add unified HTTP protocol selector
-- Add ALPN negotiation for http11 and http2
+- Add ALPN negotiation for http1 and http2
 - Implement stream reset and connection shutdown
 - Add flow control and priority scheduling
 - Implement stream lifecycle and header reassembly
@@ -18,12 +18,12 @@
 - Add request and response serialization
 - Add request/status line and header parser
 - Add stream adapter layer for HTTP protocols
-- Scaffold http11/http2 modules and shared HTTP foundation
+- Scaffold http1/http2 modules and shared HTTP foundation
 - Add unified Pipe for transport-agnostic communication
 
 ### <!-- 3 -->📚 Documentation
 
-- Add phased plan for http11 and http2 implementation
+- Add phased plan for http1 and http2 implementation
 
 ### <!-- 4 -->⚡ Performance
 
@@ -41,7 +41,7 @@
 
 ### Examples
 
-- Add http11 and http2 usage demos
+- Add http1 and http2 usage demos
 - Send dp::String over RPC in SHM example
 - Use echo logging in AnyStream SHM RPC
 - Print payload in AnyStream SHM RPC handler

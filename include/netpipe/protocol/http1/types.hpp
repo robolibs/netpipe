@@ -2,7 +2,7 @@
 
 #include <netpipe/protocol/http/common.hpp>
 
-namespace netpipe::http11 {
+namespace netpipe::http1 {
 
     inline constexpr const char *VERSION = "HTTP/1.1";
 
@@ -37,4 +37,4 @@ namespace netpipe::http11 {
         return dp::result::ok();
     }
 
-} // namespace netpipe::http11
+} // namespace netpipe::http1

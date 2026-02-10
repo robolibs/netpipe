@@ -1,9 +1,9 @@
 #include <doctest/doctest.h>
 
-#include <netpipe/protocol/http11/incremental.hpp>
+#include <netpipe/protocol/http1/incremental.hpp>
 
 TEST_CASE("HTTP/1.1 incremental request parser with Content-Length") {
-    netpipe::http11::IncrementalRequestParser parser;
+    netpipe::http1::IncrementalRequestParser parser;
 
     netpipe::Message p1{'P',  'O',  'S', 'T', ' ', '/', 'v', '1', ' ', 'H',  'T',  'T',  'P',  '/',  '1',  '.', '1',
                         '\r', '\n', 'H', 'o', 's', 't', ':', ' ', 'x', '\r', '\n', 'C',  'o',  'n',  't',  'e', 'n',
@@ -22,7 +22,7 @@ TEST_CASE("HTTP/1.1 incremental request parser with Content-Length") {
 }
 
 TEST_CASE("HTTP/1.1 incremental request parser chunked with trailers") {
-    netpipe::http11::IncrementalRequestParser parser;
+    netpipe::http1::IncrementalRequestParser parser;
 
     parser.feed(netpipe::Message{'P',  'O',  'S',  'T',  ' ',  '/',  'u', 'p',  ' ',  'H', 'T', 'T', 'P',
                                  '/',  '1',  '.',  '1',  '\r', '\n', 'H', 'o',  's',  't', ':', ' ', 'x',
@@ -48,7 +48,7 @@ TEST_CASE("HTTP/1.1 incremental request parser chunked with trailers") {
 }
 
 TEST_CASE("HTTP/1.1 incremental response parser with chunked trailers") {
-    netpipe::http11::IncrementalResponseParser parser;
+    netpipe::http1::IncrementalResponseParser parser;
 
     parser.feed(netpipe::Message{'H', 'T', 'T',  'P',  '/',  '1',  '.',  '1',  ' ', '2',  '0',  '0', ' ',
                                  'O', 'K', '\r', '\n', 'T',  'r',  'a',  'n',  's', 'f',  'e',  'r', '-',

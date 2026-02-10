@@ -15,15 +15,15 @@
 
 #include <netpipe/protocol/http/common.hpp>
 #include <netpipe/protocol/http/transport_adapter.hpp>
-#include <netpipe/protocol/http11/body.hpp>
-#include <netpipe/protocol/http11/connection.hpp>
-#include <netpipe/protocol/http11/incremental.hpp>
-#include <netpipe/protocol/http11/parser.hpp>
-#include <netpipe/protocol/http11/pipelining.hpp>
-#include <netpipe/protocol/http11/serialize.hpp>
-#include <netpipe/protocol/http11/types.hpp>
+#include <netpipe/protocol/http1/body.hpp>
+#include <netpipe/protocol/http1/connection.hpp>
+#include <netpipe/protocol/http1/incremental.hpp>
+#include <netpipe/protocol/http1/parser.hpp>
+#include <netpipe/protocol/http1/pipelining.hpp>
+#include <netpipe/protocol/http1/serialize.hpp>
+#include <netpipe/protocol/http1/types.hpp>
 
 namespace netpipe {
-    using Http11Request = http11::Request;
-    using Http11Response = http11::Response;
+    using Http1Request = http1::Request;
+    using Http1Response = http1::Response;
 } // namespace netpipe

@@ -2,9 +2,9 @@
 
 #include <algorithm>
 
-#include <netpipe/protocol/http11/serialize.hpp>
+#include <netpipe/protocol/http1/serialize.hpp>
 
-namespace netpipe::http11 {
+namespace netpipe::http1 {
 
     enum class BodyKind { None, ContentLength, Chunked };
 
@@ -222,4 +222,4 @@ namespace netpipe::http11 {
         return dp::result::ok(std::move(parsed.value().body));
     }
 
-} // namespace netpipe::http11
+} // namespace netpipe::http1

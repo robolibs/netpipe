@@ -18,7 +18,7 @@ namespace netpipe::http2 {
         ConnectError = 0xA,
         EnhanceYourCalm = 0xB,
         InadequateSecurity = 0xC,
-        Http11Required = 0xD,
+        Http1Required = 0xD,
     };
 
     struct GoAway {

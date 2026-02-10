@@ -8,10 +8,10 @@ TEST_CASE("HTTP examples API compile smoke") {
     netpipe::http::NegotiatedCapabilities caps11;
     caps11.alpn_protocol = dp::String("http/1.1");
     selector.set_capabilities(caps11);
-    auto h11 = selector.create_http11_client();
+    auto h11 = selector.create_http1_client();
     CHECK(h11.is_ok());
 
-    netpipe::http11::Request req;
+    netpipe::http1::Request req;
     req.target = "/";
     auto encoded = h11.value().encode_request(req);
     CHECK(encoded.is_ok());

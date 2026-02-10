@@ -1,16 +1,16 @@
 #pragma once
 
-#include <netpipe/protocol/http11.hpp>
+#include <netpipe/protocol/http1.hpp>
 #include <netpipe/protocol/http2.hpp>
 
 namespace netpipe::http::fuzz {
 
-    inline dp::Result<void> fuzz_http11_head_parse(const dp::Vector<dp::u8> &input) {
+    inline dp::Result<void> fuzz_http1_head_parse(const dp::Vector<dp::u8> &input) {
         dp::String text(reinterpret_cast<const char *>(input.data()), input.size());
-        auto req = http11::parse_request_head_with_options(
-            text, http11::ParseOptions{.strict = false, .allow_obs_fold = true, .accept_lf_line_endings = true});
+        auto req = http1::parse_request_head_with_options(
+            text, http1::ParseOptions{.strict = false, .allow_obs_fold = true, .accept_lf_line_endings = true});
         if (req.is_ok()) {
-            auto encoded = http11::serialize_request_head(req.value());
+            auto encoded = http1::serialize_request_head(req.value());
             if (encoded.is_err()) {
                 return dp::result::err(encoded.error());
             }

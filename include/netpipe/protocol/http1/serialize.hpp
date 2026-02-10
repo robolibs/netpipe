@@ -1,8 +1,8 @@
 #pragma once
 
-#include <netpipe/protocol/http11/parser.hpp>
+#include <netpipe/protocol/http1/parser.hpp>
 
-namespace netpipe::http11 {
+namespace netpipe::http1 {
 
     inline void set_header(http::HeaderList &headers, const dp::String &name, const dp::String &value) {
         for (auto &header : headers) {
@@ -71,4 +71,4 @@ namespace netpipe::http11 {
         return dp::result::ok(std::move(out));
     }
 
-} // namespace netpipe::http11
+} // namespace netpipe::http1

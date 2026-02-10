@@ -1,9 +1,9 @@
 #pragma once
 
-#include <netpipe/protocol/http11/connection.hpp>
-#include <netpipe/protocol/http11/incremental.hpp>
+#include <netpipe/protocol/http1/connection.hpp>
+#include <netpipe/protocol/http1/incremental.hpp>
 
-namespace netpipe::http11 {
+namespace netpipe::http1 {
 
     inline bool header_value_contains_token(const dp::String &value, const dp::String &token) {
         auto lower_value = header_name_to_lower(value);
@@ -217,4 +217,4 @@ namespace netpipe::http11 {
         dp::Optional<dp::String> upgraded_protocol_;
     };
 
-} // namespace netpipe::http11
+} // namespace netpipe::http1
