@@ -20,6 +20,7 @@ TEST_CASE("HTTP examples API compile smoke") {
     caps2.tls_active = true;
     caps2.alpn_protocol = dp::String("h2");
     selector.set_capabilities(caps2);
-    auto h2 = selector.create_http2_stream_manager();
+    auto h2 = selector.create_http2_connection(true);
     CHECK(h2.is_ok());
+    CHECK(h2.value().is_client());
 }
