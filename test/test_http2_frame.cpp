@@ -53,3 +53,30 @@ TEST_CASE("HTTP/2 frame validation for control stream rules") {
     ping.stream_id = 0;
     CHECK(netpipe::http2::validate_frame_header(ping).is_ok());
 }
+
+TEST_CASE("HTTP/2 frame payload semantic validation") {
+    netpipe::http2::Frame ping;
+    ping.header.type = netpipe::http2::FrameType::Ping;
+    ping.header.stream_id = 0;
+    ping.payload = dp::Vector<dp::u8>(8, 0x11);
+    CHECK(netpipe::http2::serialize_frame(ping).is_ok());
+
+    ping.payload.push_back(0x22);
+    CHECK(netpipe::http2::serialize_frame(ping).is_err());
+
+    netpipe::http2::Frame settings_ack;
+    settings_ack.header.type = netpipe::http2::FrameType::Settings;
+    settings_ack.header.flags = 0x1;
+    settings_ack.header.stream_id = 0;
+    settings_ack.payload = {0x00};
+    CHECK(netpipe::http2::serialize_frame(settings_ack).is_err());
+
+    netpipe::http2::Frame window_update;
+    window_update.header.type = netpipe::http2::FrameType::WindowUpdate;
+    window_update.header.stream_id = 1;
+    window_update.payload = {0x00, 0x00, 0x00, 0x00};
+    CHECK(netpipe::http2::serialize_frame(window_update).is_err());
+
+    window_update.payload = {0x00, 0x00, 0x00, 0x01};
+    CHECK(netpipe::http2::serialize_frame(window_update).is_ok());
+}

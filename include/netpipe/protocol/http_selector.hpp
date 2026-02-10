@@ -1,16 +1,16 @@
 #pragma once
 
-#include <netpipe/protocol/http11.hpp>
+#include <netpipe/protocol/http1.hpp>
 #include <netpipe/protocol/http2.hpp>
 #include <netpipe/protocol/http3.hpp>
 
 namespace netpipe::http {
 
-    enum class Version { Auto, Http11, Http2, Http3 };
+    enum class Version { Auto, Http1, Http2, Http3 };
 
     struct SelectorConfig {
         Version preferred = Version::Auto;
-        bool allow_http11 = true;
+        bool allow_http1 = true;
         bool allow_http2 = true;
         bool allow_http3 = true;
         bool require_tls_for_http2 = true;
@@ -27,7 +27,7 @@ namespace netpipe::http {
         switch (version) {
         case Version::Auto:
             return "auto";
-        case Version::Http11:
+        case Version::Http1:
             return "http/1.1";
         case Version::Http2:
             return "h2";
@@ -39,7 +39,7 @@ namespace netpipe::http {
 
     inline dp::Optional<Version> from_alpn(const dp::String &alpn) {
         if (alpn == "http/1.1") {
-            return Version::Http11;
+            return Version::Http1;
         }
         if (alpn == "h2") {
             return Version::Http2;
@@ -51,7 +51,7 @@ namespace netpipe::http {
     }
 
     inline dp::Result<void> validate_version_allowed(Version version, const SelectorConfig &config) {
-        if (version == Version::Http11 && !config.allow_http11) {
+        if (version == Version::Http1 && !config.allow_http1) {
             return dp::result::err(dp::Error::invalid_argument("HTTP/1.1 is disabled in selector config"));
         }
         if (version == Version::Http2 && !config.allow_http2) {
@@ -98,8 +98,8 @@ namespace netpipe::http {
             return choose(Version::Http2);
         }
 
-        if (config.allow_http11) {
-            return choose(Version::Http11);
+        if (config.allow_http1) {
+            return choose(Version::Http1);
         }
 
         return dp::result::err(dp::Error::invalid_argument("no compatible HTTP version available"));
@@ -114,15 +114,15 @@ namespace netpipe::http {
 
         dp::Result<Version> select() const { return select_version(config_, caps_); }
 
-        dp::Result<http11::ClientConnection> create_http11_client() const {
+        dp::Result<http1::ClientConnection> create_http1_client() const {
             auto selected = select();
             if (selected.is_err()) {
                 return dp::result::err(selected.error());
             }
-            if (selected.value() != Version::Http11) {
+            if (selected.value() != Version::Http1) {
                 return dp::result::err(dp::Error::invalid_argument("selector did not choose HTTP/1.1"));
             }
-            return dp::result::ok(http11::ClientConnection{});
+            return dp::result::ok(http1::ClientConnection{});
         }
 
         dp::Result<http2::StreamManager> create_http2_stream_manager() const {
@@ -134,6 +134,17 @@ namespace netpipe::http {
                 return dp::result::err(dp::Error::invalid_argument("selector did not choose HTTP/2"));
             }
             return dp::result::ok(http2::StreamManager{});
+        }
+
+        dp::Result<http2::Connection> create_http2_connection(bool is_client = true) const {
+            auto selected = select();
+            if (selected.is_err()) {
+                return dp::result::err(selected.error());
+            }
+            if (selected.value() != Version::Http2) {
+                return dp::result::err(dp::Error::invalid_argument("selector did not choose HTTP/2"));
+            }
+            return dp::result::ok(http2::Connection{is_client});
         }
 
       private:

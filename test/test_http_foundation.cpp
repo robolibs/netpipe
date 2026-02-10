@@ -1,7 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <netpipe/protocol/http/common.hpp>
-#include <netpipe/protocol/http11.hpp>
+#include <netpipe/protocol/http1.hpp>
 #include <netpipe/protocol/http2.hpp>
 
 TEST_CASE("HTTP foundation method conversion") {
@@ -20,17 +20,17 @@ TEST_CASE("HTTP foundation status helpers") {
 }
 
 TEST_CASE("HTTP11 scaffold validates basic request and response") {
-    netpipe::http11::Request request;
+    netpipe::http1::Request request;
     request.method = netpipe::http::Method::Get;
     request.target = "/health";
 
-    CHECK(netpipe::http11::validate_request(request).is_ok());
+    CHECK(netpipe::http1::validate_request(request).is_ok());
 
-    netpipe::http11::Response response;
+    netpipe::http1::Response response;
     response.status_code = 204;
     response.reason = netpipe::http::reason_phrase(response.status_code);
 
-    CHECK(netpipe::http11::validate_response(response).is_ok());
+    CHECK(netpipe::http1::validate_response(response).is_ok());
 }
 
 TEST_CASE("HTTP2 scaffold validates pseudo-header requirements") {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <netpipe/protocol/http2/types.hpp>
+#include <netpipe/protocol/http3/qpack.hpp>
 
 namespace netpipe::http2 {
 
@@ -193,13 +194,18 @@ namespace netpipe::http2 {
                 return dp::result::err(len_res.error());
             }
 
-            if (huffman) {
-                return dp::result::err(dp::Error::invalid_argument("HPACK Huffman decoding not implemented yet"));
-            }
-
             dp::usize len = len_res.value();
             if (pos + len > in.size()) {
                 return dp::result::err(dp::Error::invalid_argument("truncated HPACK string"));
+            }
+
+            if (huffman) {
+                auto decoded = http3::huffman_decoder().decode(in.data() + pos, len);
+                if (decoded.is_err()) {
+                    return dp::result::err(decoded.error());
+                }
+                pos += len;
+                return dp::result::ok(std::move(decoded.value()));
             }
 
             dp::String out(reinterpret_cast<const char *>(in.data() + pos), len);

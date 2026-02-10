@@ -1,20 +1,20 @@
 #include <doctest/doctest.h>
 
-#include <netpipe/protocol/http11.hpp>
+#include <netpipe/protocol/http1.hpp>
 #include <netpipe/protocol/http2.hpp>
 
 TEST_CASE("HTTP/1.1 conformance smoke") {
-    auto req = netpipe::http11::parse_request_head("GET /index.html HTTP/1.1\r\n"
+    auto req = netpipe::http1::parse_request_head("GET /index.html HTTP/1.1\r\n"
                                                    "Host: example.com\r\n"
                                                    "\r\n");
     CHECK(req.is_ok());
 
-    auto bad_version = netpipe::http11::parse_request_head("GET / HTTP/1.0\r\n"
+    auto bad_version = netpipe::http1::parse_request_head("GET / HTTP/1.0\r\n"
                                                            "Host: example.com\r\n"
                                                            "\r\n");
     CHECK(bad_version.is_err());
 
-    auto bad_obs_fold = netpipe::http11::parse_request_head("GET / HTTP/1.1\r\n"
+    auto bad_obs_fold = netpipe::http1::parse_request_head("GET / HTTP/1.1\r\n"
                                                             "X-Test: a\r\n"
                                                             " b\r\n"
                                                             "\r\n");

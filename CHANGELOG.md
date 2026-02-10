@@ -1,11 +1,33 @@
 # Changelog
 
+## [0.0.19] - 2026-02-10
+
+### <!-- 0 -->⛰️  Features
+
+- Add pipelining queue model and upgrade path
+- Add incremental parsing and chunked trailer support
+- Enforce stricter frame semantic validation
+- Add HPACK Huffman string decode support
+- Extend selector with http2 connection factory
+- Implement connection startup and graceful shutdown orchestration
+- Add request response framing helpers to connection
+- Integrate settings stream flow and shutdown engines
+- Add connection session scaffold
+
+### <!-- 2 -->🚜 Refactor
+
+- Rename http11 module and APIs to http1
+
+### Examples
+
+- Migrate http2 example to connection session api
+
 ## [0.0.17] - 2026-02-09
 
 ### <!-- 0 -->⛰️  Features
 
 - Add unified HTTP protocol selector
-- Add ALPN negotiation for http11 and http2
+- Add ALPN negotiation for http1 and http2
 - Implement stream reset and connection shutdown
 - Add flow control and priority scheduling
 - Implement stream lifecycle and header reassembly
@@ -18,12 +40,12 @@
 - Add request and response serialization
 - Add request/status line and header parser
 - Add stream adapter layer for HTTP protocols
-- Scaffold http11/http2 modules and shared HTTP foundation
+- Scaffold http1/http2 modules and shared HTTP foundation
 - Add unified Pipe for transport-agnostic communication
 
 ### <!-- 3 -->📚 Documentation
 
-- Add phased plan for http11 and http2 implementation
+- Add phased plan for http1 and http2 implementation
 
 ### <!-- 4 -->⚡ Performance
 
@@ -41,7 +63,7 @@
 
 ### Examples
 
-- Add http11 and http2 usage demos
+- Add http1 and http2 usage demos
 - Send dp::String over RPC in SHM example
 - Use echo logging in AnyStream SHM RPC
 - Print payload in AnyStream SHM RPC handler

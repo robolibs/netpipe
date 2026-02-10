@@ -31,7 +31,7 @@ TEST_CASE("HTTP selector falls back to HTTP/1.1") {
     netpipe::http::NegotiatedCapabilities caps;
     auto selected = netpipe::http::select_version(config, caps);
     REQUIRE(selected.is_ok());
-    CHECK(selected.value() == netpipe::http::Version::Http11);
+    CHECK(selected.value() == netpipe::http::Version::Http1);
 }
 
 TEST_CASE("HTTP selector enforces preferred version constraints") {
@@ -56,6 +56,10 @@ TEST_CASE("HTTP selector factory helpers follow selected version") {
     auto h2_mgr = selector.create_http2_stream_manager();
     CHECK(h2_mgr.is_ok());
 
-    auto h11_client = selector.create_http11_client();
+    auto h2_conn = selector.create_http2_connection(true);
+    CHECK(h2_conn.is_ok());
+    CHECK(h2_conn.value().is_client());
+
+    auto h11_client = selector.create_http1_client();
     CHECK(h11_client.is_err());
 }

@@ -2,7 +2,7 @@
 
 #include <netpipe/protocol/http/fuzz.hpp>
 
-TEST_CASE("HTTP fuzz regression corpus: http11 heads") {
+TEST_CASE("HTTP fuzz regression corpus: http1 heads") {
     dp::Vector<dp::Vector<dp::u8>> corpus = {
         {},
         {'G', 'E', 'T', ' ', '/', ' ', 'H', 'T', 'T', 'P', '/', '1', '.', '1', '\n', '\n'},
@@ -11,7 +11,7 @@ TEST_CASE("HTTP fuzz regression corpus: http11 heads") {
     };
 
     for (const auto &input : corpus) {
-        CHECK(netpipe::http::fuzz::fuzz_http11_head_parse(input).is_ok());
+        CHECK(netpipe::http::fuzz::fuzz_http1_head_parse(input).is_ok());
     }
 }
 

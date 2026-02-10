@@ -66,6 +66,109 @@ namespace netpipe::http2 {
         return dp::result::ok();
     }
 
+    inline dp::Result<void> validate_frame_payload(const FrameHeader &header, const dp::Vector<dp::u8> &payload) {
+        if (payload.size() != header.length) {
+            return dp::result::err(dp::Error::invalid_argument("HTTP/2 frame header length mismatch payload size"));
+        }
+
+        switch (header.type) {
+        case FrameType::Ping:
+            if (payload.size() != 8) {
+                return dp::result::err(dp::Error::invalid_argument("HTTP/2 PING payload must be 8 bytes"));
+            }
+            break;
+
+        case FrameType::Priority:
+            if (payload.size() != 5) {
+                return dp::result::err(dp::Error::invalid_argument("HTTP/2 PRIORITY payload must be 5 bytes"));
+            }
+            break;
+
+        case FrameType::RstStream:
+            if (payload.size() != 4) {
+                return dp::result::err(dp::Error::invalid_argument("HTTP/2 RST_STREAM payload must be 4 bytes"));
+            }
+            break;
+
+        case FrameType::Settings:
+            if ((header.flags & 0x1) != 0) {
+                if (!payload.empty()) {
+                    return dp::result::err(dp::Error::invalid_argument("HTTP/2 SETTINGS ACK payload must be empty"));
+                }
+            } else if ((payload.size() % 6) != 0) {
+                return dp::result::err(
+                    dp::Error::invalid_argument("HTTP/2 SETTINGS payload must be multiple of 6 bytes"));
+            }
+            break;
+
+        case FrameType::GoAway:
+            if (payload.size() < 8) {
+                return dp::result::err(dp::Error::invalid_argument("HTTP/2 GOAWAY payload must be at least 8 bytes"));
+            }
+            break;
+
+        case FrameType::WindowUpdate:
+            if (payload.size() != 4) {
+                return dp::result::err(dp::Error::invalid_argument("HTTP/2 WINDOW_UPDATE payload must be 4 bytes"));
+            }
+            if (payload.size() == 4) {
+                dp::u32 increment = (static_cast<dp::u32>(payload[0] & 0x7F) << 24) |
+                                    (static_cast<dp::u32>(payload[1]) << 16) | (static_cast<dp::u32>(payload[2]) << 8) |
+                                    static_cast<dp::u32>(payload[3]);
+                if (increment == 0) {
+                    return dp::result::err(
+                        dp::Error::invalid_argument("HTTP/2 WINDOW_UPDATE increment must be non-zero"));
+                }
+            }
+            break;
+
+        case FrameType::Headers:
+            if ((header.flags & 0x8) != 0 && payload.empty()) {
+                return dp::result::err(
+                    dp::Error::invalid_argument("HTTP/2 HEADERS PADDED flag requires pad length byte"));
+            }
+            if ((header.flags & 0x20) != 0) {
+                dp::usize min_len = ((header.flags & 0x8) != 0) ? 6 : 5;
+                if (payload.size() < min_len) {
+                    return dp::result::err(
+                        dp::Error::invalid_argument("HTTP/2 HEADERS PRIORITY flag requires 5-byte priority section"));
+                }
+            }
+            break;
+
+        case FrameType::PushPromise:
+            if ((header.flags & 0x8) != 0 && payload.empty()) {
+                return dp::result::err(
+                    dp::Error::invalid_argument("HTTP/2 PUSH_PROMISE PADDED flag requires pad length byte"));
+            }
+            if (payload.size() < (((header.flags & 0x8) != 0) ? 5 : 4)) {
+                return dp::result::err(
+                    dp::Error::invalid_argument("HTTP/2 PUSH_PROMISE payload too short for promised stream id"));
+            }
+            break;
+
+        case FrameType::Continuation:
+        case FrameType::Data:
+            if ((header.flags & 0x8) != 0 && payload.empty()) {
+                return dp::result::err(dp::Error::invalid_argument("HTTP/2 PADDED frame requires pad length byte"));
+            }
+            break;
+
+        default:
+            break;
+        }
+
+        return dp::result::ok();
+    }
+
+    inline dp::Result<void> validate_frame(const Frame &frame) {
+        auto header_valid = validate_frame_header(frame.header);
+        if (header_valid.is_err()) {
+            return dp::result::err(header_valid.error());
+        }
+        return validate_frame_payload(frame.header, frame.payload);
+    }
+
     inline dp::Vector<dp::u8> serialize_frame_header(const FrameHeader &header) {
         dp::Vector<dp::u8> out;
         out.reserve(9);
@@ -110,7 +213,9 @@ namespace netpipe::http2 {
         FrameHeader header = frame.header;
         header.length = static_cast<dp::u32>(frame.payload.size());
 
-        auto valid = validate_frame_header(header);
+        Frame normalized = frame;
+        normalized.header = header;
+        auto valid = validate_frame(normalized);
         if (valid.is_err()) {
             return dp::result::err(valid.error());
         }
@@ -134,6 +239,11 @@ namespace netpipe::http2 {
         Frame frame;
         frame.header = header;
         frame.payload = dp::Vector<dp::u8>(data + consumed, data + consumed + header.length);
+
+        auto valid = validate_frame(frame);
+        if (valid.is_err()) {
+            return dp::result::err(valid.error());
+        }
 
         return dp::result::ok(std::make_pair(std::move(frame), consumed + header.length));
     }
