@@ -25,7 +25,8 @@ namespace netpipe::http2 {
 
     class Connection {
       public:
-        explicit Connection(bool is_client) : is_client_(is_client), settings_(is_client) {}
+        explicit Connection(bool is_client)
+            : is_client_(is_client), settings_(is_client), next_outbound_stream_id_(is_client ? 1u : 2u) {}
 
         bool is_client() const { return is_client_; }
         ConnectionState state() const { return settings_.state(); }
@@ -216,6 +217,73 @@ namespace netpipe::http2 {
             return dp::result::ok();
         }
 
+        dp::Result<dp::u32> open_request_stream() {
+            if (draining()) {
+                return dp::result::err(dp::Error::invalid_argument("connection is draining; cannot open new stream"));
+            }
+
+            dp::u32 stream_id = next_outbound_stream_id_;
+            next_outbound_stream_id_ += 2;
+
+            flow_controller_.ensure_stream(stream_id);
+            shutdown_manager_.on_stream_opened(stream_id);
+            return dp::result::ok(stream_id);
+        }
+
+        dp::Result<void> send_request_headers(dp::u32 stream_id, const Request &request, bool end_stream) {
+            auto valid = validate_request(request);
+            if (valid.is_err()) {
+                return dp::result::err(valid.error());
+            }
+
+            http::HeaderList headers;
+            headers.push_back({":method", http::to_string(request.method)});
+            headers.push_back({":scheme", request.scheme});
+            headers.push_back({":path", request.path});
+            headers.push_back({":authority", request.authority});
+            headers.insert(headers.end(), request.headers.begin(), request.headers.end());
+
+            return send_header_block(stream_id, headers, end_stream);
+        }
+
+        dp::Result<void> send_response_headers(dp::u32 stream_id, const Response &response, bool end_stream) {
+            auto valid = validate_response(response);
+            if (valid.is_err()) {
+                return dp::result::err(valid.error());
+            }
+
+            http::HeaderList headers;
+            headers.push_back({":status", std::to_string(response.status_code).c_str()});
+            headers.insert(headers.end(), response.headers.begin(), response.headers.end());
+
+            return send_header_block(stream_id, headers, end_stream);
+        }
+
+        dp::Result<void> send_data(dp::u32 stream_id, const dp::Vector<dp::u8> &payload, bool end_stream) {
+            flow_controller_.ensure_stream(stream_id);
+
+            auto consume = flow_controller_.consume_outbound(stream_id, static_cast<dp::i32>(payload.size()));
+            if (consume.is_err()) {
+                return dp::result::err(consume.error());
+            }
+
+            Frame frame;
+            frame.header.type = FrameType::Data;
+            frame.header.stream_id = stream_id;
+            frame.header.flags = end_stream ? 0x1 : 0x0;
+            frame.payload = payload;
+
+            auto queued = enqueue_frame(frame);
+            if (queued.is_err()) {
+                return dp::result::err(queued.error());
+            }
+
+            if (end_stream) {
+                shutdown_manager_.on_stream_closed(stream_id);
+            }
+            return dp::result::ok();
+        }
+
         bool has_outbound() const { return !outbound_.empty(); }
 
         bool has_event() const { return !events_.empty(); }
@@ -245,8 +313,44 @@ namespace netpipe::http2 {
         FlowController &flow_controller() { return flow_controller_; }
         ShutdownManager &shutdown_manager() { return shutdown_manager_; }
         StreamManager &stream_manager() { return stream_manager_; }
+        bool draining() const { return shutdown_manager_.draining(); }
 
       private:
+        dp::Result<void> send_header_block(dp::u32 stream_id, const http::HeaderList &headers, bool end_stream) {
+            flow_controller_.ensure_stream(stream_id);
+
+            auto encoded = header_encoder_.encode(headers);
+            if (encoded.is_err()) {
+                return dp::result::err(encoded.error());
+            }
+
+            Frame frame;
+            frame.header.type = FrameType::Headers;
+            frame.header.stream_id = stream_id;
+            frame.header.flags = 0x4 | (end_stream ? 0x1 : 0x0); // END_HEADERS | optional END_STREAM
+            frame.payload = std::move(encoded.value());
+
+            auto queued = enqueue_frame(frame);
+            if (queued.is_err()) {
+                return dp::result::err(queued.error());
+            }
+
+            shutdown_manager_.on_stream_opened(stream_id);
+            if (end_stream) {
+                shutdown_manager_.on_stream_closed(stream_id);
+            }
+            return dp::result::ok();
+        }
+
+        dp::Result<void> enqueue_frame(const Frame &frame) {
+            auto serialized = serialize_frame(frame);
+            if (serialized.is_err()) {
+                return dp::result::err(serialized.error());
+            }
+            outbound_.push_back(std::move(serialized.value()));
+            return dp::result::ok();
+        }
+
         bool is_client_ = false;
         SettingsStateMachine settings_;
         StreamManager stream_manager_;
@@ -256,6 +360,7 @@ namespace netpipe::http2 {
         HpackContext header_decoder_;
         dp::Vector<netpipe::Message> outbound_;
         dp::Vector<InboundEvent> events_;
+        dp::u32 next_outbound_stream_id_ = 1;
     };
 
 } // namespace netpipe::http2

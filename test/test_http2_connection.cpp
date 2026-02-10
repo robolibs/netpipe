@@ -146,3 +146,79 @@ TEST_CASE("HTTP/2 connection emits structured inbound events") {
     CHECK(goaway_event.value().goaway.has_value());
     CHECK(goaway_event.value().goaway.value().last_stream_id == 5);
 }
+
+TEST_CASE("HTTP/2 connection request response helper roundtrip") {
+    netpipe::http2::Connection client(true);
+    netpipe::http2::Connection server(false);
+
+    auto stream_id_result = client.open_request_stream();
+    REQUIRE(stream_id_result.is_ok());
+    dp::u32 stream_id = stream_id_result.value();
+    CHECK((stream_id % 2) == 1);
+
+    netpipe::http2::Request request;
+    request.method = netpipe::http::Method::Get;
+    request.scheme = "https";
+    request.authority = "example.com";
+    request.path = "/v1/ping";
+    request.headers.push_back({"accept", "application/json"});
+
+    REQUIRE(client.send_request_headers(stream_id, request, false).is_ok());
+    REQUIRE(client.send_data(stream_id, {'p', 'i', 'n', 'g'}, true).is_ok());
+
+    auto req_headers_wire = client.pop_outbound();
+    REQUIRE(req_headers_wire.is_ok());
+    auto req_frame = netpipe::http2::parse_frame(req_headers_wire.value().data(), req_headers_wire.value().size());
+    REQUIRE(req_frame.is_ok());
+    REQUIRE(server.process_inbound_frame(req_frame.value().first).is_ok());
+
+    auto req_data_wire = client.pop_outbound();
+    REQUIRE(req_data_wire.is_ok());
+    auto req_data_frame = netpipe::http2::parse_frame(req_data_wire.value().data(), req_data_wire.value().size());
+    REQUIRE(req_data_frame.is_ok());
+    REQUIRE(server.process_inbound_frame(req_data_frame.value().first).is_ok());
+
+    REQUIRE(server.has_event());
+    auto ev1 = server.pop_event();
+    REQUIRE(ev1.is_ok());
+    CHECK(ev1.value().type == netpipe::http2::InboundEventType::Headers);
+    CHECK(ev1.value().stream_id == stream_id);
+
+    REQUIRE(server.has_event());
+    auto ev2 = server.pop_event();
+    REQUIRE(ev2.is_ok());
+    CHECK(ev2.value().type == netpipe::http2::InboundEventType::Data);
+    CHECK(ev2.value().end_stream);
+    CHECK(ev2.value().data.size() == 4);
+
+    netpipe::http2::Response response;
+    response.status_code = 200;
+    response.headers.push_back({"content-type", "application/json"});
+
+    REQUIRE(server.send_response_headers(stream_id, response, false).is_ok());
+    REQUIRE(server.send_data(stream_id, {'o', 'k'}, true).is_ok());
+
+    auto resp_headers_wire = server.pop_outbound();
+    REQUIRE(resp_headers_wire.is_ok());
+    auto resp_headers_frame =
+        netpipe::http2::parse_frame(resp_headers_wire.value().data(), resp_headers_wire.value().size());
+    REQUIRE(resp_headers_frame.is_ok());
+    REQUIRE(client.process_inbound_frame(resp_headers_frame.value().first).is_ok());
+
+    auto resp_data_wire = server.pop_outbound();
+    REQUIRE(resp_data_wire.is_ok());
+    auto resp_data_frame = netpipe::http2::parse_frame(resp_data_wire.value().data(), resp_data_wire.value().size());
+    REQUIRE(resp_data_frame.is_ok());
+    REQUIRE(client.process_inbound_frame(resp_data_frame.value().first).is_ok());
+
+    REQUIRE(client.has_event());
+    auto cev1 = client.pop_event();
+    REQUIRE(cev1.is_ok());
+    CHECK(cev1.value().type == netpipe::http2::InboundEventType::Headers);
+
+    REQUIRE(client.has_event());
+    auto cev2 = client.pop_event();
+    REQUIRE(cev2.is_ok());
+    CHECK(cev2.value().type == netpipe::http2::InboundEventType::Data);
+    CHECK(cev2.value().data.size() == 2);
+}
