@@ -1,6 +1,7 @@
 #include <doctest/doctest.h>
 
 #include <netpipe/protocol/http2/hpack.hpp>
+#include <netpipe/protocol/http3/qpack.hpp>
 
 TEST_CASE("HTTP/2 HPACK decodes indexed static header") {
     netpipe::http2::HpackContext ctx;
@@ -57,13 +58,24 @@ TEST_CASE("HTTP/2 HPACK dynamic table helps second block") {
     CHECK(decoded_second.value()[0].value == "abc-123");
 }
 
-TEST_CASE("HTTP/2 HPACK rejects huffman string for now") {
+TEST_CASE("HTTP/2 HPACK decodes huffman-encoded literal header") {
     netpipe::http2::HpackContext ctx;
 
-    // Literal with indexing and new name, but name length uses huffman flag.
-    // 0x40 => literal with indexing and name index 0
-    // 0x81 => huffman=1, len=1
-    dp::Vector<dp::u8> block{0x40, 0x81, 0x61, 0x01, 0x62};
+    auto name_h = netpipe::http3::huffman_encoder().encode("x-name");
+    auto value_h = netpipe::http3::huffman_encoder().encode("x-value");
+
+    // Literal Header Field with Incremental Indexing (new name)
+    // name-len byte has H bit set, same for value-len.
+    dp::Vector<dp::u8> block;
+    block.push_back(0x40);
+    block.push_back(static_cast<dp::u8>(0x80 | name_h.size()));
+    block.insert(block.end(), name_h.begin(), name_h.end());
+    block.push_back(static_cast<dp::u8>(0x80 | value_h.size()));
+    block.insert(block.end(), value_h.begin(), value_h.end());
+
     auto decoded = ctx.decode(block);
-    CHECK(decoded.is_err());
+    REQUIRE(decoded.is_ok());
+    REQUIRE(decoded.value().size() == 1);
+    CHECK(decoded.value()[0].name == "x-name");
+    CHECK(decoded.value()[0].value == "x-value");
 }
